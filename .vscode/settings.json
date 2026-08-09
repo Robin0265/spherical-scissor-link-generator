@@ -1,5 +1,7 @@
 {
   "python.languageServer": "Pylance",
+  "python.defaultInterpreterPath": "${workspaceFolder}/.fusion-python/python.exe",
+  "python.terminal.activateEnvironment": false,
   "python.analysis.typeCheckingMode": "basic",
   "python.analysis.extraPaths": [
     "./typings"
@@ -16,9 +18,11 @@
   },
   "search.exclude": {
     "**/__pycache__": true,
-    "typings": true
+    "typings": true,
+    ".fusion-python": true
   },
   "files.watcherExclude": {
-    "**/typings/**": true
+    "**/typings/**": true,
+    "**/.fusion-python/**": true
   }
 }

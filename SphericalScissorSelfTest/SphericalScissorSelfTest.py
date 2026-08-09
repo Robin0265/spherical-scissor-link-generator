@@ -32,14 +32,25 @@ def _load_generator():
     return ssm, builder, parameters
 
 
-def _audit(design, root, prefix):
+def _build_component(design, component_name):
+    """The component a packed build went into, or the root for pack=False."""
+    root = design.rootComponent
+    for occ in root.occurrences:
+        if occ.component.name == component_name:
+            return occ.component
+    return root
+
+
+def _audit(design, comp, prefix):
     """Independent re-measurement, not a re-read of the generator's own report."""
     alpha = design.userParameters.itemByName('alpha').value
     radius = design.userParameters.itemByName('sphere_Radius').value
     problems = []
-    for sk in root.sketches:
+    checked = 0
+    for sk in comp.sketches:
         if not sk.name.startswith(prefix):
             continue
+        checked += 1
         if not sk.isFullyConstrained:
             problems.append('%s not fully constrained' % sk.name)
         if not sk.name.startswith(prefix + 'Link_'):
@@ -53,12 +64,24 @@ def _audit(design, root, prefix):
             want = (2 if 'Long' in sk.name else 1) * radius * alpha
             if abs(length - want) > 1e-4:
                 problems.append('%s is %.4f alpha' % (sk.name, length / (radius * alpha)))
-    for item in design.timeline:
+    if checked == 0:
+        problems.append('audit found no %s sketches to check' % prefix)
+
+    def check_item(item):
         try:
+            if item.isGroup:
+                # Group containers report Unknown health by design, and a
+                # collapsed group hides its members from top-level iteration.
+                for i in range(item.count):
+                    check_item(item.item(i))
+                return
             if item.healthState != adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState:
                 problems.append('unhealthy: %s' % (item.entity.name if item.entity else '?'))
         except Exception:
             pass
+
+    for item in design.timeline:
+        check_item(item)
     return problems
 
 
@@ -100,17 +123,18 @@ def run(context):
                          % (n, got, want, report['closure_mm'],
                             'FAIL %s' % report['problems'] if bad else 'ok'))
 
-        # 2. live regeneration after generation
+        # 2. live regeneration after generation (inside the packed component)
         lines.append('')
         lines.append('Parameter regeneration (n=3)')
         build(overrides={'n': '3'}, purge=True)
+        comp = _build_component(design, ssm.COMPONENT_NAME)
         table = design.userParameters
         for name, value in (('span_target', '45 deg'), ('link_Radius', '160 mm'),
                             ('beta', '9 deg'), ('span_max', '110 deg')):
             original = table.itemByName(name).expression
             table.itemByName(name).expression = value
             design.computeAll()
-            problems = _audit(design, root, prefix)
+            problems = _audit(design, comp, prefix)
             failures += 1 if problems else 0
             lines.append('  %s = %-9s %s' % (name, value,
                                              'FAIL %s' % problems[:2] if problems else 'ok'))
@@ -139,17 +163,19 @@ def run(context):
         except RuntimeError as err:
             lines.append('  parallel planes  rejected: %s' % str(err).splitlines()[0][:52])
 
-        # 5. re-running must replace, not accumulate
+        # 5. re-running must replace, not accumulate; root must stay clean
         lines.append('')
-        lines.append('Idempotency')
+        lines.append('Idempotency & packing')
         counts = []
         for _ in range(3):
             build(overrides={'n': '3'}, purge=True)
-            counts.append((root.sketches.count, root.constructionPlanes.count,
-                           root.constructionAxes.count))
+            counts.append((root.occurrences.count, design.timeline.count,
+                           root.sketches.count))
         same = len(set(counts)) == 1
-        failures += 0 if same else 1
-        lines.append('  repeat builds -> %s  %s' % (counts[0], 'ok' if same else 'FAIL %s' % counts))
+        packed_clean = counts[-1][0] == 1 and counts[-1][1] == 1 and counts[-1][2] == 0
+        failures += 0 if (same and packed_clean) else 1
+        lines.append('  repeat builds -> (occurrences, timeline, root sketches) = %s  %s'
+                     % (counts[0], 'ok' if same and packed_clean else 'FAIL %s' % counts))
 
         # 6. impossible parameter sets must be refused before drawing
         lines.append('')

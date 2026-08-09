@@ -55,13 +55,23 @@ def verify(design, comp, solved, frame):
         report['problems'].append(
             'terminal links miss the apex by %.4f mm' % report['closure_mm'])
 
-    for item in design.timeline:
+    def check_item(item):
         try:
+            if item.isGroup:
+                # Group containers report UnknownFeatureHealthState by design;
+                # a collapsed group hides its members from the top-level
+                # timeline iteration, so descend into it explicitly.
+                for i in range(item.count):
+                    check_item(item.item(i))
+                return
             if item.healthState != adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState:
                 report['problems'].append(
                     'feature "%s" is not healthy' % (item.entity.name if item.entity else '?'))
         except Exception:
             pass
+
+    for item in design.timeline:
+        check_item(item)
 
     return report
 
@@ -77,6 +87,17 @@ def format_report(report, solved):
         '',
         'Closure residual at the apex: %.2e mm' % report['closure_mm'],
     ]
+    where = ('component "%s"' % report['component']) if report.get('component') else 'the root component'
+    if report.get('custom_feature'):
+        lines.append('Built into %s as custom feature "%s" - double-click it in '
+                     'the timeline to edit.' % (where, report['custom_feature']))
+    elif report.get('grouped'):
+        lines.append('Built into %s and collapsed into one timeline group.' % where)
+        lines.append('(Custom feature unavailable - run the add-in rather than '
+                     'the script to get an editable timeline node.)')
+    if report.get('pack_note'):
+        lines.append('')
+        lines.append('NOTE: ' + report['pack_note'])
     if report['problems']:
         lines.append('')
         lines.append('PROBLEMS:')

@@ -1,0 +1,13 @@
+{
+    "autodeskProduct": "Fusion",
+    "type": "addin",
+    "id": "ssm-spherical-scissor-addin",
+    "author": "Yuanshao Yang",
+    "description": {
+        "": "Generates the fully-parametric sketch skeleton of an n-rhombi spherical scissor linkage. Adds a Spherical Scissor panel to the UTILITIES tab."
+    },
+    "version": "1.0.0",
+    "runOnStartup": true,
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}

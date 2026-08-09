@@ -13,4 +13,8 @@ here:
 
 PREFIX = 'SSM_'
 
-__all__ = ['PREFIX', 'vectors', 'parameters', 'frame', 'sketching', 'builder', 'audit']
+# Browser name of the sub-component the mechanism is packed into.
+COMPONENT_NAME = 'Spherical Scissor'
+
+__all__ = ['PREFIX', 'COMPONENT_NAME', 'vectors', 'parameters', 'frame',
+           'sketching', 'builder', 'audit']

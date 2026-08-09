@@ -15,15 +15,35 @@ every joint, link plane, and link arc is solved and constrained from there.
 > Editing the source in VS Code? Run `pwsh -File tools/Refresh-FusionPaths.ps1`
 > first so `import adsk.core` resolves — see [Development](#development).
 
-Fusion loads scripts from folders whose name matches the `.py` inside them.
+There are two entry points and they share the same dialog and geometry code.
+**Prefer the add-in**; the script exists for development and as a fallback.
+
+### Add-in (recommended)
 
 1. **Utilities → ADD-INS → Scripts and Add-Ins** (or `Shift+S`).
-2. On the **Scripts** tab, click the green **+** next to *My Scripts*.
-3. Select the `SphericalScissorGenerator` folder in this repo.
-4. Pick it in the list and hit **Run**.
+2. On the **Add-Ins** tab, click the green **+** next to *My Add-Ins*.
+3. Select the `SphericalScissorAddIn` folder in this repo.
+4. Select it in the list and hit **Run**. Tick **Run on Startup** to keep it
+   loaded.
 
-The document must be **parametric** (Capture Design History on); the script
-checks this and tells you if it is not.
+A **Spherical Scissor** panel appears in the **UTILITIES** tab with a Generate
+button. Only the add-in can register the CustomFeature definition, because
+Fusion requires that to happen at add-in startup.
+
+The add-in deliberately imports the `ssm` package from the
+`SphericalScissorGenerator` folder rather than keeping its own copy, so keep
+both folders side by side in the repo.
+
+### Script
+
+1. Same dialog, `Shift+S`, **Scripts** tab, **+** next to *My Scripts*.
+2. Select the `SphericalScissorGenerator` folder, then **Run**.
+
+No toolbar button, and no custom feature — the timeline group packing is used
+instead.
+
+Either way the document must be **parametric** (Capture Design History on);
+both entry points check and tell you if it is not.
 
 ## Using it
 
@@ -95,6 +115,27 @@ modules from `sys.modules` before importing, so edits take effect on the next
 run.
 
 ## What it builds
+
+By default the whole run is **packed**: every feature goes into a sub-component
+named *Spherical Scissor*, and the timeline range (including the component
+creation) is collapsed into a single named group. The browser shows one
+component and the timeline shows one entry; expand either to see the details.
+Re-running with *Delete features from previous runs* replaces the component in
+place. Untick *Pack into one component + timeline group* to build loose into
+the root component instead.
+
+**Part Design documents** (the default for new documents since Fusion's
+January 2026 Intent-Driven Design update) allow exactly one component, so the
+sub-component cannot be created there. The generator detects this and falls
+back automatically: the mechanism builds into the root component and the
+timeline group is still applied, with a note in the report. For the packed
+sub-component, use a **Hybrid Design** or Assembly document (Document Settings
+→ edit the design type).
+
+The mechanism stays fully live either way — the parameters below are ordinary
+user parameters, so editing them in **Modify → Change Parameters** re-solves
+everything inside the package. (This is the pragmatic stand-in for a true
+"custom feature" with edit-in-dialog; see the note at the end.)
 
 ```
 SSM_Axis_OA          spine plane x start plane: joint A's direction
@@ -168,6 +209,15 @@ Impossible parameter sets are rejected before anything is drawn, with the reason
 — e.g. `delta/2 >= alpha` means the rhombus cannot close, so either lower
 `span_target`, raise `n`, or raise `span_max`.
 
+One hazard the dialog cannot guard: **Modify → Change Parameters** accepts any
+value, including impossible ones. Driving the parameters through an invalid
+region (e.g. `span_target` large enough that `delta/2 >= alpha`) can flip an
+equal-chord constraint onto its mirror solution, and reverting the parameter
+does **not** flip it back — a middle link then measures ~2.3&nbsp;alpha instead
+of 2. The sketches still report fully constrained (they are — onto the wrong
+branch), so the arc-length audit is what catches it. The fix is simply to
+re-run the generator: a fresh build always lands on the correct branch.
+
 ## Verified against
 
 - `n = 1, 2, 3, 4, 6` — link counts `2n+2`, closure residual `~1e-14 mm`.
@@ -201,35 +251,70 @@ Instead, run this once after cloning and again after any Fusion update:
 pwsh -File tools/Refresh-FusionPaths.ps1
 ```
 
-It creates a directory junction (no admin rights needed):
+It creates two directory junctions (no admin rights needed):
 
 ```
-<repo>/typings/adsk  ->  <fusion build>/Api/Python/packages/adsk/defs/adsk
+<repo>/typings/adsk    ->  <fusion build>/Api/Python/packages/adsk/defs/adsk
+<repo>/.fusion-python  ->  <fusion build>/Python
 ```
 
-so the committed settings only ever say `"./typings"`. `typings/` is gitignored,
-which keeps every machine-specific path out of version control while still
-letting `.vscode/settings.json` be shared. Reload the window afterwards
+so the committed settings only ever say `"./typings"` and
+`"${workspaceFolder}/.fusion-python/python.exe"`. Both link folders are
+gitignored, which keeps every machine-specific path out of version control while
+still letting `.vscode/settings.json` be shared. Reload the window afterwards
 (`Ctrl+Shift+P` → *Developer: Reload Window*).
 
-Re-running the script is safe and idempotent; it replaces the junction in place.
-It deletes only the reparse point, never following the link into your Fusion
-install.
+The interpreter junction is deliberately **not** inside `typings/`, because that
+folder is a Pylance analysis root — a `python` folder in it would be indexed as
+a package.
+
+This is not a hypothetical staleness problem. Fusion updated during development:
+the previous build's `Api` and `Python` folders were **deleted in place**, the
+junction went dangling, and re-running the script repaired it against the new
+build in one command.
+
+Re-running is safe and idempotent; it replaces the junctions in place, deleting
+only the reparse point and never following a link into your Fusion install.
+
+### Which Python interpreter?
+
+`.vscode/settings.json` sets `python.defaultInterpreterPath` to Fusion's own
+bundled interpreter (3.14.0 in the current build) via the junction. This does
+**not** change how your code runs — Fusion always executes scripts in its own
+embedded interpreter. It only makes static analysis honest: without it VS Code
+falls back to whatever Python it finds first (an unrelated 3.11 in one case
+here), so Pylance resolves the wrong standard library and misjudges
+version-specific syntax.
+
+`defaultInterpreterPath` is only a fallback. If an interpreter has already been
+picked for this workspace, that choice wins — run **Python: Select Interpreter**
+and choose the one under `.fusion-python`.
+
+Fusion's Python ships the full standard library but **no pip**, which is
+convenient here: nothing can accidentally install packages into the Fusion
+install. Autodesk's guidance for third-party modules is to keep a local copy
+beside your script rather than installing or extending `sys.path`.
 
 ### Can you run the script outside Fusion?
 
-**No.** Fusion ships a complete CPython (3.14.0 in the current build) at
-`…/<build>/Python/python.exe`, but it is an *embedded* interpreter. The `adsk`
-modules are thin wrappers over `.pyd` binaries that bind to the running Fusion
-process, so importing them standalone fails:
+**Not the API parts.** Fusion ships a complete CPython (3.14.0 in the current
+build) at `…/<build>/Python/python.exe`, and that interpreter does run fine on
+its own — the full standard library is there. What cannot leave Fusion is the
+API *runtime*: `adsk.core` and friends are thin wrappers over `.pyd` binaries
+that bind to the live Fusion process, so importing them standalone fails:
 
 ```
 ImportError: DLL load failed while importing _core: The specified module could not be found.
 ```
 
-There is no way to unit-test API code in a plain terminal, and no pip-installable
-`adsk` package. Everything has to execute inside a live Fusion session — which
-is why this repo ships an in-Fusion self-test instead of a pytest suite.
+The typed definitions under `defs/` are the exception — they are pure Python, so
+they import anywhere. That is what makes them usable as the analysis path, and
+it is how the junction setup can be verified from a plain terminal.
+
+So there is no way to unit-test API code outside Fusion, and no pip-installable
+`adsk` package. Anything that touches the document has to execute inside a live
+session — which is why this repo ships an in-Fusion self-test rather than a
+pytest suite.
 
 ### Testing workflow
 
@@ -269,17 +354,56 @@ Its audit re-measures the geometry independently rather than trusting the
 generator's own report, so the two have to agree for a pass.
 
 **3. Debug with breakpoints.** In the Scripts and Add-Ins dialog select the
-script and click **Edit** — Fusion opens it in VS Code and drops its own
-`launch.json` into the *script* folder. That generated config attaches to
-`localhost:9000`, but it still declares the legacy `"type": "python"` and
-`${workspaceRoot}`, both of which current VS Code rejects. The
-`Attach to Fusion 360` config in this repo's root `.vscode/launch.json` is the
-same attach on the same port, written with `"type": "debugpy"` and
-`${workspaceFolder}` — use that one. Fusion regenerates its copy on every
-**Edit** click, so it is gitignored.
+script and click **Edit**. Fusion opens it in VS Code, installs the
+`ms-python.python` extension the first time, and drops its own `launch.json`
+into the *script* folder. Set breakpoints, then **Run → Start Debugging** (F5).
+
+Worth understanding: this is an **attach**, not a launch. Fusion starts debugpy
+inside the interpreter it is already running and listens on a TCP port; VS Code
+connects to it. Your code always executes inside Fusion, which is why no
+interpreter choice in VS Code can change how it runs, and why the debugger is
+the only way to step through live API calls. The port defaults to 9000 and is
+configurable in Fusion's **Preferences → General → API**; a
+`connect ECONNREFUSED 127.0.0.1:9000` means VS Code tried to attach before
+Fusion opened the port, or the port setting was changed.
+
+Fusion's generated config attaches to `localhost:9000` but declares the legacy
+`"type": "python"` and `${workspaceRoot}`, both of which current VS Code
+rejects. The `Attach to Fusion 360` config in this repo's root
+`.vscode/launch.json` is the same attach on the same port written with
+`"type": "debugpy"` and `${workspaceFolder}` — use that one. Fusion regenerates
+its copy on every **Edit** click, so it is gitignored.
 
 `print()` output goes to Fusion's **Text Commands** palette
 (`View → Show Text Commands`), which is the quickest way to watch a run.
+
+## Tuning a generated mechanism
+
+The driving parameters stay live after generation. **Modify → Change
+Parameters** edits `link_Radius`, `beta`, `span_max`, `n`, `span_target` and the
+solid-stage placeholders; everything re-solves inside the packed component.
+`alpha`, `delta`, `gamma_` and `lambda` are derived and update themselves.
+
+`n` is topology rather than a dimension — changing it there will not add or
+remove links. Re-run the generator for a different rhombus count.
+
+When run from the **add-in**, the build is wrapped in a **custom feature**: a
+single editable timeline node, double-click to reopen the dialog. From the
+**script** there is no such node (Fusion only allows the defining registration
+at add-in startup), so the timeline group is used and the report says so.
+
+## Toward a true packaged feature (Onshape FeatureScript style)
+
+Fusion's native equivalent is the **Custom Feature** API
+(`CustomFeatureDefinition` / `CustomFeatures`): one timeline node, double-click
+opens the defining dialog, `customFeatureCompute` recomputes on change. The API
+exists in current builds, but every creation attempt from a *script* fails with
+`make params invalid` — tested with/without parameters, dependencies, real
+icons, and inside a command's execute handler. The likely cause is structural:
+the feature's definition must be registered every time a document opens, which
+only an **add-in** (loaded at Fusion startup) can guarantee. Converting this
+tool to an add-in and retrying is the planned stage 2; the component + timeline
+group packing above is stage 1 and stays useful regardless.
 
 ## Next stage
 

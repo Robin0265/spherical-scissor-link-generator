@@ -19,13 +19,27 @@ from . import parameters as params
 from . import sketching as sk
 from . import frame as frame_mod
 from . import audit
-from . import PREFIX
+from . import custom_feature
+from . import PREFIX, COMPONENT_NAME
 
 
-def purge_previous(comp):
-    """Delete everything a previous run created. Only touches PREFIX names."""
+def purge_previous(design):
+    """Delete everything a previous run created.
+
+    Removes packed runs (sub-components named COMPONENT_NAME) and, for
+    compatibility with earlier versions, loose PREFIX-named features in the
+    root component. Nothing else is touched.
+    """
+    root = design.rootComponent
     removed = 0
-    for collection in (comp.sketches, comp.constructionPlanes, comp.constructionAxes):
+    for occ in list(root.occurrences):
+        try:
+            if occ.component.name.startswith(COMPONENT_NAME):
+                if occ.deleteMe():
+                    removed += 1
+        except Exception:
+            pass
+    for collection in (root.sketches, root.constructionPlanes, root.constructionAxes):
         for item in list(collection):
             if item.name.startswith(PREFIX):
                 try:
@@ -186,14 +200,19 @@ def build_end(comp, centre_ent, previous_spoke, previous_pin_point,
 
 
 def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
-          clockwise=False, flip_start=False, purge=True):
+          clockwise=False, flip_start=False, purge=True, pack=True):
     """Generate the whole skeleton. Returns an audit report.
+
+    With pack=True (the default) everything is built inside a sub-component
+    named COMPONENT_NAME and the timeline range is collapsed into one named
+    group, so the run appears as a single object in both the browser and the
+    timeline.
 
     Raises RuntimeError with a readable reason for any unusable input; the
     document is left untouched when that happens, because everything is checked
     before the first feature is created.
     """
-    comp = design.rootComponent
+    root = design.rootComponent
 
     # Solve and check before touching the document.
     preview = params.solve_expressions(design, overrides)
@@ -207,8 +226,32 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     params.validate(solved)
 
     if purge:
-        purge_previous(comp)
+        purge_previous(design)
         design.computeAll()
+
+    pack_note = None
+    comp = root
+    group_start = None
+    if pack:
+        # Part Design documents (new in 2026) allow exactly one component, so
+        # packing into a sub-component is impossible there. Fall back to
+        # building loose in the root; the timeline group is still applied.
+        try:
+            occurrence = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+        except RuntimeError as err:
+            if 'one component' not in str(err) and 'Part Design' not in str(err):
+                raise
+            pack = False
+            group_start = design.timeline.count
+            pack_note = ('This is a Part Design document (single component only), '
+                         'so the mechanism was built into the root component. '
+                         'The timeline is still collapsed into one group. Use a '
+                         'Hybrid Design or Assembly document to get the packed '
+                         'sub-component.')
+        else:
+            comp = occurrence.component
+            comp.name = COMPONENT_NAME
+            group_start = occurrence.timelineObject.index
 
     radius, delta, gamma, n = solved['R'], solved['delta'], solved['gamma'], solved['n']
 
@@ -218,6 +261,12 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     axis_input.setByTwoPlanes(spine_plane_ent, start_plane_ent)
     axis = comp.constructionAxes.add(axis_input)
     axis.name = PREFIX + 'Axis_OA'
+    # Scaffolding, like the link planes: keep it out of the viewport. Hiding
+    # does not affect the seed planes or the spine projection that reference it.
+    try:
+        axis.isLightBulbOn = False
+    except Exception:
+        pass
 
     spine_sketch, spokes, node_points = build_spine(
         comp, spine_plane_ent, centre_ent, axis, frame, solved)
@@ -257,4 +306,29 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
                   current[sign][2], apex, tag)
     design.computeAll()
 
-    return audit.verify(design, comp, solved, frame)
+    report = audit.verify(design, comp, solved, frame)
+    if pack:
+        report['component'] = comp.name
+
+    if group_start is not None and design.timeline.count > group_start:
+        # Prefer a real custom feature: one editable timeline node instead of a
+        # folder. It is only available from the add-in, and Fusion may still
+        # refuse it, so the timeline group remains the fallback. The two are
+        # alternatives - both would try to own the same timeline range.
+        feature = custom_feature.wrap(design, root, comp, group_start,
+                                      solved, overrides)
+        if feature is not None:
+            report['custom_feature'] = feature.name
+            report['grouped'] = True
+        else:
+            design.timeline.moveToEnd()
+            group = design.timeline.timelineGroups.add(
+                group_start, design.timeline.count - 1)
+            group.name = COMPONENT_NAME
+            group.isCollapsed = True
+            report['grouped'] = True
+
+    if pack_note:
+        report['pack_note'] = pack_note
+
+    return report
