@@ -1,0 +1,87 @@
+"""Independent re-measurement of what was built.
+
+Lengths come from the curve evaluator rather than endpoint positions: a sketch
+can report itself fully constrained, with its arc endpoints in exactly the right
+places, while the curve between them still carries a stale sweep from a previous
+solve. Measuring the curve is what catches that.
+"""
+
+import math
+import adsk.fusion
+
+from . import vectors as vec
+from . import PREFIX
+
+
+def verify(design, comp, solved, frame):
+    radius, alpha, n = solved['R'], solved['alpha'], solved['n']
+    report = {'links': [], 'problems': [], 'n': n}
+
+    for sketch in comp.sketches:
+        if not sketch.name.startswith(PREFIX):
+            continue
+        if not sketch.isFullyConstrained:
+            report['problems'].append('%s is not fully constrained' % sketch.name)
+        if not sketch.name.startswith(PREFIX + 'Link_'):
+            continue
+        for arc in sketch.sketchCurves.sketchArcs:
+            if arc.isConstruction or arc.isReference:
+                continue
+            evaluator = arc.worldGeometry.evaluator
+            ok, start, end = evaluator.getParameterExtents()
+            ok, length = evaluator.getLengthAtParameter(start, end)
+            multiple = 2 if 'Long' in sketch.name else 1
+            expected = multiple * radius * alpha
+            report['links'].append((sketch.name, length / expected))
+            if abs(length - expected) > 1e-4:
+                report['problems'].append(
+                    '%s spans %.3f alpha, expected %d'
+                    % (sketch.name, length / (radius * alpha), multiple))
+
+    # The terminal links are dimensioned to alpha and never welded to the apex,
+    # so how far they land from it measures the formulation itself.
+    apex = frame.joint(radius, n * solved['delta'], 0.0)
+    worst = 0.0
+    for sketch in comp.sketches:
+        if not sketch.name.startswith(PREFIX + 'Link_End'):
+            continue
+        for arc in sketch.sketchCurves.sketchArcs:
+            if arc.isConstruction or arc.isReference:
+                continue
+            worst = max(worst, min(vec.dist(arc.startSketchPoint.worldGeometry, apex),
+                                   vec.dist(arc.endSketchPoint.worldGeometry, apex)))
+    report['closure_mm'] = worst * 10.0
+    if report['closure_mm'] > 1e-3:
+        report['problems'].append(
+            'terminal links miss the apex by %.4f mm' % report['closure_mm'])
+
+    for item in design.timeline:
+        try:
+            if item.healthState != adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState:
+                report['problems'].append(
+                    'feature "%s" is not healthy' % (item.entity.name if item.entity else '?'))
+        except Exception:
+            pass
+
+    return report
+
+
+def format_report(report, solved):
+    lines = [
+        '%d rhombi, %d links generated.' % (report['n'], len(report['links'])),
+        '',
+        'alpha  = %.3f deg   (link curvature)' % math.degrees(solved['alpha']),
+        'delta  = %.3f deg   (span per rhombus)' % math.degrees(solved['delta']),
+        'gamma_ = %.3f deg   (pin elevation)' % math.degrees(solved['gamma']),
+        'lambda = %.3f deg   (seed plane dihedral)' % math.degrees(solved['lam']),
+        '',
+        'Closure residual at the apex: %.2e mm' % report['closure_mm'],
+    ]
+    if report['problems']:
+        lines.append('')
+        lines.append('PROBLEMS:')
+        lines.extend('  - ' + problem for problem in report['problems'])
+    else:
+        lines.append('Every link measures exactly 1 or 2 alpha; all sketches '
+                     'fully constrained.')
+    return '\n'.join(lines)

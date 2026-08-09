@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion",
+    "type": "script",
+    "author": "Yuanshao Yang",
+    "description": {
+        "": "Builds the spherical scissor skeleton in a throwaway document and audits link lengths, closure, regeneration, idempotency, and input validation."
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}

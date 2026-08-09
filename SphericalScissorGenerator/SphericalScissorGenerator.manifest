@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion",
+    "type": "script",
+    "author": "Yuanshao Yang",
+    "description": {
+        "": "Generates the fully-parametric sketch skeleton of an n-rhombi spherical scissor linkage from a user-selected sphere centre, spine plane, and design parameters."
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}

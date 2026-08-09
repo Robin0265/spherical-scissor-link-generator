@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Fusion 360 API definitions, linked locally by tools/Refresh-FusionPaths.ps1
+# (machine-specific junction - never commit)
+typings/
+
+# Fusion script manifests must be committed - Fusion will not recognise a
+# script folder without one. The Python template's PyInstaller rule (*.manifest)
+# would otherwise silently exclude them and break a fresh clone.
+!SphericalScissorGenerator/*.manifest
+!SphericalScissorSelfTest/*.manifest
+
+# Fusion regenerates this inside the script folder on every "Edit" click, and it
+# uses the legacy "type": "python" schema. Use the repo-root .vscode/launch.json.
+SphericalScissorGenerator/.vscode/

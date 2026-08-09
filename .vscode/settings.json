@@ -1,0 +1,24 @@
+{
+  "python.languageServer": "Pylance",
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.extraPaths": [
+    "./typings"
+  ],
+  "python.autoComplete.extraPaths": [
+    "./typings"
+  ],
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingModuleSource": "none",
+    "reportAttributeAccessIssue": "warning"
+  },
+  "files.exclude": {
+    "**/__pycache__": true
+  },
+  "search.exclude": {
+    "**/__pycache__": true,
+    "typings": true
+  },
+  "files.watcherExclude": {
+    "**/typings/**": true
+  }
+}
