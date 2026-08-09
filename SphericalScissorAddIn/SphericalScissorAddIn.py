@@ -66,8 +66,9 @@ def run(context):
         _ui = _app.userInterface
 
         # Must happen at add-in load, before any custom feature is created or
-        # any document containing one is opened.
-        custom_feature.register_definition(_app, _HERE)
+        # any document containing one is opened. The icon folder doubles as the
+        # timeline node's icon for features of this type.
+        custom_feature.register_definition(_app, command.resource_folder() or _HERE)
 
         definition = command.register(_app, _ui, terminate_on_destroy=False)
 

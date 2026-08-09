@@ -294,6 +294,19 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
 
+def resource_folder():
+    """The icon folder (…/SphericalScissorGenerator/resources/generate).
+
+    Icons are generated from the mechanism's own geometry by
+    tools/make_icons.py. Returns '' when absent so registration still works.
+    """
+    import os
+    folder = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'resources', 'generate')
+    return folder if os.path.isdir(folder) else ''
+
+
 def register(app, ui, terminate_on_destroy=False):
     """Create (or replace) the command definition and return it.
 
@@ -306,7 +319,8 @@ def register(app, ui, terminate_on_destroy=False):
         existing.deleteMe()
     definition = ui.commandDefinitions.addButtonDefinition(
         CMD_ID, CMD_NAME,
-        'Generate a parametric spherical scissor linkage sketch skeleton')
+        'Generate a parametric spherical scissor linkage sketch skeleton',
+        resource_folder())
     created = CreatedHandler(terminate_on_destroy)
     definition.commandCreated.add(created)
     _handlers.append(created)
