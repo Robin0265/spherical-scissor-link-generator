@@ -343,7 +343,7 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
 
     if with_solids:
         try:
-            solid_report = solids.build_all(design, comp)
+            solid_report = solids.build_all(design, comp, frame.C)
             report['solid_bodies'] = solid_report['bodies']
             report['solid_joints'] = solid_report['joints']
             report['problems'].extend(solid_report['problems'])

@@ -28,6 +28,11 @@ IN, OUT = -1, +1
 def _unit(x, y, z):
     n = math.sqrt(x * x + y * y + z * z)
     return (x / n, y / n, z / n)
+def _rad(pnt, C):
+    """Distance of a world point from the sphere centre C (an (x,y,z) tuple).
+    The sphere centre is wherever the user put it - nothing in this module may
+    measure from the document origin."""
+    return math.sqrt((pnt.x - C[0])**2 + (pnt.y - C[1])**2 + (pnt.z - C[2])**2)
 def _p(x, y, z=0.0):
     return adsk.core.Point3D.create(x, y, z)
 def _params(design):
@@ -48,7 +53,7 @@ def _params(design):
         'bore': val('bearing_OD'),
     }
 # ------------------------------------------------------------- discovery --
-def discover_links(comp, prm):
+def discover_links(comp, prm, C):
     """All link sketches with their arcs, joint directions, and kind."""
     links = {}
     for sk in comp.sketches:
@@ -62,8 +67,8 @@ def discover_links(comp, prm):
             continue
         sw = arc.startSketchPoint.worldGeometry
         ew = arc.endSketchPoint.worldGeometry
-        u_s = _unit(sw.x, sw.y, sw.z)
-        u_e = _unit(ew.x, ew.y, ew.z)
+        u_s = _unit(sw.x - C[0], sw.y - C[1], sw.z - C[2])
+        u_e = _unit(ew.x - C[0], ew.y - C[1], ew.z - C[2])
         span = math.acos(max(-1.0, min(1.0, u_s[0]*u_e[0] + u_s[1]*u_e[1] + u_s[2]*u_e[2])))
         is_long = span > 1.5 * prm['alpha']
         joints = [u_s, u_e]
@@ -112,7 +117,7 @@ def assign_levels(links):
     if len(levels) != len(links):
         raise RuntimeError('Link graph is disconnected - unexpected topology.')
     return levels
-def _radial_line(link_sketch, u, R):
+def _radial_line(link_sketch, u, R, C):
     """The radial line along direction u in the link's sketch, and its
     on-sphere endpoint."""
     for ln in link_sketch.sketchCurves.sketchLines:
@@ -122,15 +127,14 @@ def _radial_line(link_sketch, u, R):
         if abs(abs(v[0]*u[0] + v[1]*u[1] + v[2]*u[2]) - 1.0) < 1e-4:
             anchor = None
             for ep in (ln.startSketchPoint, ln.endSketchPoint):
-                w = ep.worldGeometry
-                if abs(math.sqrt(w.x**2 + w.y**2 + w.z**2) - R) < 1e-3:
+                if abs(_rad(ep.worldGeometry, C) - R) < 1e-3:
                     anchor = ep
             if anchor is not None:
                 return ln, anchor
     raise RuntimeError('%s: no radial line along (%.2f, %.2f, %.2f).'
                        % (link_sketch.name, u[0], u[1], u[2]))
 # ------------------------------------------------------------------ bar --
-def build_bar(comp, design, info, level, prm, name):
+def build_bar(comp, design, info, level, prm, name, C):
     """Swept bar with the fully-constrained centre-rectangle profile."""
     arc, link_sketch = info['arc'], info['sketch']
     R, bw, btk, loff, brg = (prm['R'], prm['bw'], prm['btk'], prm['loff'],
@@ -141,7 +145,7 @@ def build_bar(comp, design, info, level, prm, name):
     else:
         r_near, r_far = R - off, R - off - btk
     u0 = info['joints'][0]
-    radial, _anchor = _radial_line(link_sketch, u0, R)
+    radial, _anchor = _radial_line(link_sketch, u0, R, C)
     nrm = arc.worldGeometry.normal
     w = _unit(nrm.x, nrm.y, nrm.z)
     plane_input = comp.constructionPlanes.createInput()
@@ -154,7 +158,8 @@ def build_bar(comp, design, info, level, prm, name):
     dims = sk.sketchDimensions
     # corners in sketch space, drawn slightly nudged then constrained
     def corner(r, side):
-        wp = _p(r*u0[0] + side*w[0], r*u0[1] + side*w[1], r*u0[2] + side*w[2])
+        wp = _p(C[0] + r*u0[0] + side*w[0], C[1] + r*u0[1] + side*w[1],
+                C[2] + r*u0[2] + side*w[2])
         return sk.modelToSketchSpace(wp)
     c = [corner(r_near, bw/2), corner(r_near, -bw/2),
          corner(r_far, -bw/2), corner(r_far, bw/2)]
@@ -229,12 +234,11 @@ OUT_MID = ('( link_Radius + l_offset + bearing_thickness / 2 + '
            'bar_thickness / 2 ) / link_Radius')
 IN_MID = ('( link_Radius - l_offset - bearing_thickness / 2 - '
           'bar_thickness / 2 ) / link_Radius')
-def add_boss(comp, design, body, link_sketch, u, level, prm, name, index):
+def add_boss(comp, design, body, link_sketch, u, level, prm, name, index, C):
     R, bw, btk, loff, brg = (prm['R'], prm['bw'], prm['btk'], prm['loff'],
                              prm['brg'])
-    radial, anchor = _radial_line(link_sketch, u, R)
-    s1 = radial.startSketchPoint.worldGeometry
-    starts_centre = math.sqrt(s1.x**2 + s1.y**2 + s1.z**2) < R / 2
+    radial, anchor = _radial_line(link_sketch, u, R, C)
+    starts_centre = _rad(radial.startSketchPoint.worldGeometry, C) < R / 2
     base = OUT_MID if level == OUT else IN_MID
     core = base.split(' / link_Radius')[0]
     expr = base if starts_centre else ('( link_Radius - ' + core +
@@ -244,8 +248,7 @@ def add_boss(comp, design, body, link_sketch, u, level, prm, name, index):
                                     adsk.core.ValueInput.createByString(expr))
     plane = comp.constructionPlanes.add(plane_input)
     plane.name = '%sMid_%s_%d' % (PREFIX, name, index)
-    g = plane.geometry
-    r_now = math.sqrt(g.origin.x**2 + g.origin.y**2 + g.origin.z**2)
+    r_now = _rad(plane.geometry.origin, C)
     want = R + level * (loff + brg/2 + btk/2)
     if abs(r_now - want) > 1e-3:
         raise RuntimeError('%s: midplane at %.3f, expected %.3f'
@@ -317,21 +320,26 @@ def add_boss(comp, design, body, link_sketch, u, level, prm, name, index):
     bore_input.participantBodies = [body]
     comp.features.extrudeFeatures.add(bore_input)
 # ------------------------------------------------------------- assembly --
-def build_all(design, comp):
-    """Build every link body. Returns an audit report dict."""
+def build_all(design, comp, centre):
+    """Build every link body. Returns an audit report dict.
+
+    `centre` is the sphere centre the skeleton was built about (frame.C); all
+    radial measurements are made from it, never from the document origin.
+    """
     prm = _params(design)
-    links = discover_links(comp, prm)
+    C = (centre.x, centre.y, centre.z)
+    links = discover_links(comp, prm, C)
     levels = assign_levels(links)
     for name in sorted(links):
         info = links[name]
         short = name.replace(PREFIX + 'Link_', '')
-        body = build_bar(comp, design, info, levels[name], prm, short)
+        body = build_bar(comp, design, info, levels[name], prm, short, C)
         for idx, u in enumerate(info['joints']):
             add_boss(comp, design, body, info['sketch'], u, levels[name],
-                     prm, short, idx)
+                     prm, short, idx, C)
         design.computeAll()
-    return audit_joints(design, comp, prm)
-def audit_joints(design, comp, prm):
+    return audit_joints(design, comp, prm, C)
+def audit_joints(design, comp, prm, C):
     """Every joint must mate one IN and one OUT body with a bearing_thickness
     gap centred on the sphere."""
     R, brg, bore_r = prm['R'], prm['brg'], prm['bore']/2
@@ -350,7 +358,8 @@ def audit_joints(design, comp, prm):
             for edge in face.edges:
                 for vertex in (edge.startVertex, edge.endVertex):
                     p = vertex.geometry
-                    t = abs(p.x*au[0] + p.y*au[1] + p.z*au[2])
+                    t = abs((p.x - C[0])*au[0] + (p.y - C[1])*au[1]
+                            + (p.z - C[2])*au[2])
                     lo, hi = min(lo, t), max(hi, t)
             for j in joints:
                 if (abs(au[0]-j[0][0]) < 1e-3 and abs(au[1]-j[0][1]) < 1e-3
