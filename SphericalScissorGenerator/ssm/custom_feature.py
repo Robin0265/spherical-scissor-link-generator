@@ -91,8 +91,21 @@ def is_available():
     return STORE.get('definition') is not None
 
 
-def wrap(design, root, component, start_index, solved, overrides):
+# Dependency ids deliberately match the dialog's selection-input ids, so the
+# edit path can map them back without a translation table.
+SELECTION_IDS = ('centrePoint', 'spinePlane', 'startPlane')
+ATTR_GROUP = 'SSM'
+OPTION_IDS = ('clockwise', 'flip_start', 'solids')
+
+
+def wrap(design, root, component, start_index, solved, overrides,
+         selections=None, options=None):
     """Group the timeline range into one custom feature.
+
+    `selections` ({'centrePoint': entity, 'spinePlane': ..., 'startPlane': ...})
+    is stored as feature dependencies and `options` ({'clockwise': bool, ...})
+    as attributes, so that editing the feature later can restore the dialog
+    exactly as it was.
 
     Returns the CustomFeature, or None if unavailable or refused - the caller
     then falls back to a timeline group. Never raises: a failure here must not
@@ -122,13 +135,15 @@ def wrap(design, root, component, start_index, solved, overrides):
         attempts.append(('component', component, min(start_index + 1, timeline.count - 1)))
 
     for _label, owner, first_index in attempts:
-        feature = _try_wrap(timeline, owner, definition, first_index, overrides)
+        feature = _try_wrap(timeline, owner, definition, first_index, overrides,
+                            selections)
         if feature is not None:
+            _store_options(feature, options)
             return feature
     return None
 
 
-def _try_wrap(timeline, owner, definition, first_index, overrides):
+def _try_wrap(timeline, owner, definition, first_index, overrides, selections):
     try:
         first = timeline.item(first_index).entity
         last = timeline.item(timeline.count - 1).entity
@@ -148,9 +163,121 @@ def _try_wrap(timeline, owner, definition, first_index, overrides):
                 name, name, adsk.core.ValueInput.createByString(expression),
                 units, True)
 
+        # Remember the defining selections so Edit Feature can restore them.
+        for dep_id, entity in (selections or {}).items():
+            if entity is not None:
+                try:
+                    feature_input.addDependency(dep_id, entity)
+                except Exception:
+                    pass
+
         return owner.features.customFeatures.add(feature_input)
     except Exception:
         return None
+
+
+def _store_options(feature, options):
+    for key, value in (options or {}).items():
+        try:
+            feature.attributes.add(ATTR_GROUP, key, '1' if value else '0')
+        except Exception:
+            pass
+
+
+def edit_target(ui):
+    """The custom feature the user double-clicked to edit, or None.
+
+    Fusion launches the editCommandId command with the feature as the active
+    selection; a plain toolbar launch has no such selection.
+    """
+    try:
+        if ui.activeSelections.count != 1:
+            return None
+        feature = adsk.fusion.CustomFeature.cast(
+            ui.activeSelections.item(0).entity)
+        if feature is None:
+            return None
+        if feature.definition.id != DEFINITION_ID:
+            return None
+        return feature
+    except Exception:
+        return None
+
+
+def read_state(feature, design=None):
+    """Selections and options previously stored on a feature by wrap().
+
+    Features created before dependency storage existed carry no dependencies,
+    and the API refuses to add them outside the feature's own edit context - so
+    any missing selection is recovered from the generated geometry instead:
+    the OA axis was built by setByTwoPlanes(spine, start) and the Spine sketch
+    projects exactly one point, the centre.
+    """
+    selections = {}
+    for dep_id in SELECTION_IDS:
+        entity = None
+        try:
+            dep = feature.dependencies.itemById(dep_id)
+            if dep is not None:
+                entity = dep.entity
+                if entity is not None and not entity.isValid:
+                    entity = None
+        except Exception:
+            entity = None
+        selections[dep_id] = entity
+
+    if design is not None and any(selections[i] is None for i in SELECTION_IDS):
+        recovered = _recover_selections(design)
+        for dep_id in SELECTION_IDS:
+            if selections[dep_id] is None:
+                selections[dep_id] = recovered.get(dep_id)
+
+    options = {}
+    for key in OPTION_IDS:
+        try:
+            attr = feature.attributes.itemByName(ATTR_GROUP, key)
+            if attr is not None:
+                options[key] = attr.value == '1'
+        except Exception:
+            pass
+    return {'selections': selections, 'options': options}
+
+
+def _recover_selections(design):
+    """Best-effort recovery of the defining selections from the geometry."""
+    from . import PREFIX
+    out = {}
+    try:
+        root = design.rootComponent
+        components = [root] + [occ.component for occ in root.occurrences]
+        for comp in components:
+            for axis in comp.constructionAxes:
+                if not axis.name.endswith('Axis_OA'):
+                    continue
+                try:
+                    one = axis.definition.planarEntityOne
+                    two = axis.definition.planarEntityTwo
+                    if one is not None and one.isValid:
+                        out.setdefault('spinePlane', one)
+                    if two is not None and two.isValid:
+                        out.setdefault('startPlane', two)
+                except Exception:
+                    pass
+            for sketch in comp.sketches:
+                if not sketch.name.endswith('Spine'):
+                    continue
+                for point in sketch.sketchPoints:
+                    if not point.isReference:
+                        continue
+                    try:
+                        src = point.referencedEntity
+                        if src is not None and src.isValid:
+                            out.setdefault('centrePoint', src)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return out
 
 
 def _editable_parameters(overrides):

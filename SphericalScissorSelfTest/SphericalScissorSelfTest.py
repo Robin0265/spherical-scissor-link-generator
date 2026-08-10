@@ -44,7 +44,7 @@ def _build_component(design, component_name):
 def _audit(design, comp, prefix):
     """Independent re-measurement, not a re-read of the generator's own report."""
     alpha = design.userParameters.itemByName('alpha').value
-    radius = design.userParameters.itemByName('sphere_Radius').value
+    radius = design.userParameters.itemByName('link_Radius').value
     problems = []
     checked = 0
     for sk in comp.sketches:
@@ -188,6 +188,20 @@ def run(context):
                 lines.append('  %-16s NOT REJECTED (fail)' % label)
             except RuntimeError as err:
                 lines.append('  %-16s rejected: %s' % (label, str(err).splitlines()[0][:60]))
+
+        # 7. solid links on top of the skeleton
+        lines.append('')
+        lines.append('Solid links (n=2)')
+        report = build(overrides={'n': '2'}, purge=True, with_solids=True)
+        comp = _build_component(design, ssm.COMPONENT_NAME)
+        n_bodies = comp.bRepBodies.count
+        ok_solids = (report.get('solid_bodies') == 6 and n_bodies == 6
+                     and not report['problems'])
+        failures += 0 if ok_solids else 1
+        lines.append('  %d bodies, %d bearing joints, problems: %s  %s'
+                     % (n_bodies, report.get('solid_joints', 0),
+                        report['problems'] or 'none',
+                        'ok' if ok_solids else 'FAIL'))
 
         header = 'ALL CHECKS PASSED' if failures == 0 else '%d CHECK(S) FAILED' % failures
         text = header + '\n\n' + '\n'.join(lines)

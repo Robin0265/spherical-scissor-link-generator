@@ -9,19 +9,19 @@ import adsk.core
 
 # name, default expression, unit, comment
 DRIVING_PARAMS = [
-    ('link_Radius', '100 mm', 'mm', 'Diameter of the spherical surface tracked'),
+    ('link_Radius', '100 mm', 'mm', 'Radius of the spherical surface tracked'),
     ('beta', '5 deg', 'deg', 'Conflict (bearing intrusion) angle'),
     ('span_max', '135 deg', 'deg', 'Maximum designed spanned angle'),
     ('n', '3', '', 'Number of rhombi'),
     ('span_target', '30 deg', 'deg', 'Spanned angle of this configuration'),
-    ('l_offset', '1.5 mm', 'mm', 'Link offset (reserved for the solid stage)'),
-    ('bar_thickness', '3 mm', 'mm', 'Bar thickness (reserved for the solid stage)'),
-    ('bar_width', '8 mm', 'mm', 'Bar width (reserved for the solid stage)'),
-    ('bearing_OD', '4 mm', 'mm', 'Bearing outer diameter (reserved for the solid stage)'),
+    ('l_offset', '1.5 mm', 'mm', 'Radial clearance each boss protrudes past the bar'),
+    ('bar_thickness', '3 mm', 'mm', 'Link bar thickness (radial)'),
+    ('bar_width', '8 mm', 'mm', 'Link bar width (lateral); also the boss diameter'),
+    ('bearing_OD', '4 mm', 'mm', 'Bearing outer diameter (the bore through each boss)'),
+    ('bearing_thickness', '2 mm', 'mm', 'Thrust bearing thickness (gap between mating bosses)'),
 ]
 
 DERIVED_PARAMS = [
-    ('sphere_Radius', 'link_Radius / 2', 'mm', 'Radius of the tracked sphere'),
     ('alpha', 'acos(cos(beta) * cos(span_max / ( 2 * n )))', 'deg',
      'Curvature angle of each link'),
     ('delta', 'span_target / n', 'deg', 'Spanned angle carried by one rhombus'),
@@ -57,6 +57,22 @@ def ensure_parameters(design, overrides=None):
         _ensure(design, name, expression, units, comment)
 
 
+def remove_legacy(design):
+    """Drop parameters earlier versions created that nothing uses any more.
+
+    `sphere_Radius` existed while link_Radius was (wrongly) treated as a
+    diameter. deleteMe refuses while something still references the parameter,
+    so this is safe to call even on documents that were not purged.
+    """
+    for name in ('sphere_Radius',):
+        stale = design.userParameters.itemByName(name)
+        if stale is not None:
+            try:
+                stale.deleteMe()
+            except Exception:
+                pass
+
+
 def read_solved(design):
     """Read back what Fusion actually solved. Angles in radians, lengths in cm."""
     def value(name):
@@ -66,7 +82,7 @@ def read_solved(design):
         return param.value
 
     return {
-        'R': value('sphere_Radius'),
+        'R': value('link_Radius'),
         'alpha': value('alpha'),
         'delta': value('delta'),
         'gamma': value('gamma_'),
@@ -129,7 +145,7 @@ def solve_expressions(design, overrides=None):
         raise RuntimeError('No real seed-plane angle for these parameters.')
 
     return {
-        'R': raw['link_Radius'] / 2.0,
+        'R': raw['link_Radius'],
         'alpha': alpha,
         'delta': delta,
         'gamma': gamma,

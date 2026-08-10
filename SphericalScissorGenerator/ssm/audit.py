@@ -87,6 +87,10 @@ def format_report(report, solved):
         '',
         'Closure residual at the apex: %.2e mm' % report['closure_mm'],
     ]
+    if report.get('solid_bodies'):
+        lines.append('Solid links: %d bodies, %d bearing joints all gapped by '
+                     'bearing_thickness.' % (report['solid_bodies'],
+                                             report.get('solid_joints', 0)))
     where = ('component "%s"' % report['component']) if report.get('component') else 'the root component'
     if report.get('custom_feature'):
         lines.append('Built into %s as custom feature "%s" - double-click it in '

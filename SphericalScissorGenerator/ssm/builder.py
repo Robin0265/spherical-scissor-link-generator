@@ -20,6 +20,7 @@ from . import sketching as sk
 from . import frame as frame_mod
 from . import audit
 from . import custom_feature
+from . import solids
 from . import PREFIX, COMPONENT_NAME
 
 
@@ -39,6 +40,30 @@ def purge_previous(design):
                     removed += 1
         except Exception:
             pass
+    # Loose (pack=False) solid builds live in the root: remove their features
+    # first so the swept/extruded bodies go with them.
+    for collection in (root.features.extrudeFeatures, root.features.sweepFeatures):
+        for feature in list(collection):
+            name = ''
+            try:
+                profile = feature.profile
+                if hasattr(profile, 'parentSketch'):
+                    name = profile.parentSketch.name
+            except Exception:
+                pass
+            if name.startswith(PREFIX):
+                try:
+                    if feature.deleteMe():
+                        removed += 1
+                except Exception:
+                    pass
+    for body in list(root.bRepBodies):
+        if body.name.startswith(PREFIX):
+            try:
+                if body.deleteMe():
+                    removed += 1
+            except Exception:
+                pass
     for collection in (root.sketches, root.constructionPlanes, root.constructionAxes):
         for item in list(collection):
             if item.name.startswith(PREFIX):
@@ -91,7 +116,7 @@ def build_spine(comp, plane_ent, centre_ent, axis, frame, solved):
         a_point, j_point = arc.endSketchPoint, arc.startSketchPoint
 
     constraints.addCoincident(arc.centerSketchPoint, centre_point)
-    sk.radial_dim(sketch, arc, centre_local, radius_local, 'sphere_Radius')
+    sk.radial_dim(sketch, arc, centre_local, radius_local, 'link_Radius')
 
     spokes, node_points = [], []
     for k in range(2 * n + 1):
@@ -200,13 +225,18 @@ def build_end(comp, centre_ent, previous_spoke, previous_pin_point,
 
 
 def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
-          clockwise=False, flip_start=False, purge=True, pack=True):
+          clockwise=False, flip_start=False, purge=True, pack=True,
+          with_solids=False):
     """Generate the whole skeleton. Returns an audit report.
 
     With pack=True (the default) everything is built inside a sub-component
     named COMPONENT_NAME and the timeline range is collapsed into one named
     group, so the run appears as a single object in both the browser and the
     timeline.
+
+    with_solids=True additionally builds the physical link bodies (bars,
+    bosses, bores) via the solids module. A solids failure is reported in the
+    returned audit rather than raised, so a correct skeleton is never lost.
 
     Raises RuntimeError with a readable reason for any unusable input; the
     document is left untouched when that happens, because everything is checked
@@ -228,6 +258,9 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     if purge:
         purge_previous(design)
         design.computeAll()
+    # after the old geometry is gone, stale parameters from earlier
+    # conventions can be dropped (no-op when still referenced)
+    params.remove_legacy(design)
 
     pack_note = None
     comp = root
@@ -307,6 +340,16 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     design.computeAll()
 
     report = audit.verify(design, comp, solved, frame)
+
+    if with_solids:
+        try:
+            solid_report = solids.build_all(design, comp)
+            report['solid_bodies'] = solid_report['bodies']
+            report['solid_joints'] = solid_report['joints']
+            report['problems'].extend(solid_report['problems'])
+        except Exception as err:
+            report['problems'].append('solid stage failed: %s'
+                                      % str(err).splitlines()[-1])
     if pack:
         report['component'] = comp.name
 
@@ -315,8 +358,13 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
         # folder. It is only available from the add-in, and Fusion may still
         # refuse it, so the timeline group remains the fallback. The two are
         # alternatives - both would try to own the same timeline range.
-        feature = custom_feature.wrap(design, root, comp, group_start,
-                                      solved, overrides)
+        feature = custom_feature.wrap(
+            design, root, comp, group_start, solved, overrides,
+            selections={'centrePoint': centre_ent,
+                        'spinePlane': spine_plane_ent,
+                        'startPlane': start_plane_ent},
+            options={'clockwise': clockwise, 'flip_start': flip_start,
+                     'solids': with_solids})
         if feature is not None:
             report['custom_feature'] = feature.name
             report['grouped'] = True

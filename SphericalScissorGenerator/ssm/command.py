@@ -17,7 +17,7 @@ import adsk.core
 import adsk.fusion
 
 from . import PREFIX
-from . import audit, builder, parameters
+from . import audit, builder, custom_feature, parameters
 
 _app = None
 _ui = None
@@ -68,6 +68,7 @@ def _gather(inputs):
         'flip_start': inputs.itemById('flipStart').value,
         'purge': inputs.itemById('purge').value,
         'pack': inputs.itemById('pack').value,
+        'solids': inputs.itemById('solids').value,
     }
 
 
@@ -105,11 +106,16 @@ def _set_status(inputs, message, is_error):
     box.formattedText = template % message.replace('\n', '<br />')
 
 
-def _build(design, args):
+def _build(design, args, with_solids=None):
+    """with_solids overrides the dialog checkbox; the preview passes False
+    because the solid stage is far too slow to rebuild on every input change."""
+    if with_solids is None:
+        with_solids = args['solids']
     return builder.build(
         design, args['centre_ent'], args['spine_plane_ent'], args['start_plane_ent'],
         overrides=args['overrides'], clockwise=args['clockwise'],
-        flip_start=args['flip_start'], purge=args['purge'], pack=args['pack'])
+        flip_start=args['flip_start'], purge=args['purge'], pack=args['pack'],
+        with_solids=with_solids)
 
 
 class ValidateHandler(adsk.core.ValidateInputsEventHandler):
@@ -132,14 +138,18 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
             if problem:
                 _set_status(inputs, problem, True)
             else:
-                solved = parameters.solve_expressions(design, _gather(inputs)['overrides'])
+                gathered = _gather(inputs)
+                solved = parameters.solve_expressions(design, gathered['overrides'])
                 import math
+                note = (' Solid links build on Generate (not shown in preview).'
+                        if gathered['solids'] else '')
                 _set_status(inputs,
                             'Ready: %d rhombi, %d links. alpha %.2f&deg;, delta %.2f&deg;, '
-                            'gamma %.2f&deg;, lambda %.2f&deg;'
+                            'gamma %.2f&deg;, lambda %.2f&deg;.%s'
                             % (solved['n'], 2 * solved['n'] + 2,
                                math.degrees(solved['alpha']), math.degrees(solved['delta']),
-                               math.degrees(solved['gamma']), math.degrees(solved['lam'])),
+                               math.degrees(solved['gamma']), math.degrees(solved['lam']),
+                               note),
                             False)
         except Exception:
             pass
@@ -155,9 +165,10 @@ class PreviewHandler(adsk.core.CommandEventHandler):
             gathered = _gather(inputs)
             if _problem(design, gathered) is not None:
                 return
-            _build(design, gathered)
+            _build(design, gathered, with_solids=False)
             # Let the real execute run so the audit report is produced from a
             # clean build rather than from rolled-back preview geometry.
+            # Solids are skipped here: they are far too slow for live preview.
             args.isValidResult = False
         except Exception:
             # A preview must never interrupt the dialog with a dialog.
@@ -207,8 +218,12 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
 
     def notify(self, args):
         try:
+            # Capture the edit target BEFORE creating inputs: activating
+            # selection inputs clears the active selection Fusion handed us.
+            edited = custom_feature.edit_target(_ui)
+
             cmd = args.command
-            cmd.okButtonText = 'Generate'
+            cmd.okButtonText = 'Update' if edited else 'Generate'
             cmd.setDialogInitialSize(440, 700)
             inputs = cmd.commandInputs
 
@@ -269,6 +284,8 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             options.children.addBoolValueInput(
                 'flipStart', 'Start from the opposite side', True, '', False)
             options.children.addBoolValueInput(
+                'solids', 'Build solid links (bars, bosses, bores)', True, '', True)
+            options.children.addBoolValueInput(
                 'pack', 'Pack into one component + timeline group', True, '', True)
             options.children.addBoolValueInput(
                 'purge', 'Delete features from previous runs (%s*)' % PREFIX,
@@ -279,6 +296,30 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             inputs.addTextBoxCommandInput('status', '', '', 3, True)
 
+            restored = 0
+            if edited is not None:
+                # Editing an existing mechanism: restore what the user set up
+                # last time. Selections stay until cleared and reselected.
+                state = custom_feature.read_state(edited, design)
+                for input_id in custom_feature.SELECTION_IDS:
+                    entity = state['selections'].get(input_id)
+                    selection_input = inputs.itemById(input_id)
+                    if entity is not None and selection_input is not None:
+                        try:
+                            if selection_input.addSelection(entity):
+                                restored += 1
+                        except Exception:
+                            pass
+                opts = state['options']
+                if opts.get('clockwise'):
+                    for i in range(direction.listItems.count):
+                        item = direction.listItems.item(i)
+                        item.isSelected = item.name.startswith('Clockwise')
+                if 'flip_start' in opts:
+                    inputs.itemById('flipStart').value = opts['flip_start']
+                if 'solids' in opts:
+                    inputs.itemById('solids').value = opts['solids']
+
             for event, handler in ((cmd.execute, ExecuteHandler()),
                                    (cmd.executePreview, PreviewHandler()),
                                    (cmd.destroy, DestroyHandler(self._terminate)),
@@ -287,8 +328,21 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 event.add(handler)
                 _handlers.append(handler)
 
-            _set_status(inputs, 'Select a centre point, a spine plane, and a '
-                                'start plane.', False)
+            if edited is not None:
+                if restored == len(custom_feature.SELECTION_IDS):
+                    _set_status(inputs, 'Editing the existing mechanism - all '
+                                        'previous inputs restored. Change '
+                                        'anything and press Update.', False)
+                else:
+                    _set_status(inputs, 'Editing the existing mechanism - '
+                                        'restored %d of %d selections; please '
+                                        'reselect the missing ones.'
+                                        % (restored,
+                                           len(custom_feature.SELECTION_IDS)),
+                                True)
+            else:
+                _set_status(inputs, 'Select a centre point, a spine plane, and '
+                                    'a start plane.', False)
         except Exception:
             if _ui:
                 _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))

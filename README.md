@@ -59,7 +59,7 @@ be built.
 | **Spine plane** | The plane the rhombi chain runs in. Must contain the centre. |
 | **Start plane** | Where the chain begins. Joint A lands on this plane, and the spine leaves it at a right angle. |
 | **Direction** | Counter-clockwise or clockwise, seen looking along the spine plane normal — which way the chain fans out from the start plane. |
-| `link_Radius` | Diameter of the tracked sphere (the sphere radius is `link_Radius / 2`). |
+| `link_Radius` | Radius of the tracked sphere. |
 | `beta` | Conflict / bearing intrusion angle. |
 | `span_max` | Maximum designed spanned angle — sizes the links, draws nothing. |
 | `n` | Number of rhombi. |
@@ -77,11 +77,16 @@ plane at a right angle if the two planes are themselves perpendicular. That is
 checked, along with both planes passing through the centre; you get a specific
 message rather than silently wrong geometry.
 
-Options: **Start from the opposite side** puts A at the other end of the plane
+Options: **Build solid links** (on by default) adds the physical bodies — bars,
+bearing bosses, bores — after the skeleton; expect roughly 15–30 s depending on
+n, and note the **live preview always shows the skeleton only** (the solids are
+far too slow to rebuild per keystroke; they build when you press Generate).
+**Start from the opposite side** puts A at the other end of the plane
 intersection. **Delete features from previous runs** removes everything named
 `SSM_*` so re-running iterates in place rather than piling up duplicates; it
 never touches geometry the script did not create. **Live preview** can be turned
-off if rebuilding on every change feels slow (a 3-rhombi build takes about 1.4 s).
+off if rebuilding on every change feels slow (a 3-rhombi skeleton takes about
+1.4 s).
 
 If the origin point is not selectable, switch on the **Origin** folder in the
 browser.
@@ -155,7 +160,6 @@ result stays live after generation — change `span_target`, `link_Radius`,
 `beta`, or `span_max` and the whole skeleton re-solves:
 
 ```
-sphere_Radius = link_Radius / 2
 alpha         = acos(cos(beta) * cos(span_max / (2 * n)))
 delta         = span_target / n
 gamma_        = acos(cos(alpha) / cos(delta / 2))          # pin elevation
@@ -407,8 +411,14 @@ group packing above is stage 1 and stays useful regardless.
 
 ## Next stage
 
-The link arcs are centrelines, meant to be swept with a `bar_width` ×
-`bar_thickness` profile. At the solid stage Fusion's native **Mirror** and
-**Circular Pattern** apply (they accept bodies, though not sketches): model one
-middle bar and one end bar, mirror across the spine plane, then pattern by
-`delta` for `n-1` instances.
+`ssm/solids.py` builds the physical link bodies on top of the skeleton: curved
+bars swept along the link arcs with alternating IN/OUT radial offsets, bearing
+bosses at every joint (tangent-driven diameter, symmetric extents), and
+`bearing_OD` bores. The link cycle is two-coloured automatically — it always has
+even length 2n+2, so n = 1 (no long links) needs no special case. Verified in
+n = 1, 2, and 3 documents: every joint mates one IN and one OUT body with an
+exact `bearing_thickness` gap centred on the sphere, surviving sweeps of every
+size parameter. Wired into the dialog as **Build solid links**; a solids
+failure is reported in the result rather than losing the skeleton, and the
+whole run (skeleton + solids) still collapses into one timeline group /
+custom feature.
