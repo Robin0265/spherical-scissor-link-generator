@@ -48,10 +48,12 @@ both entry points check and tell you if it is not.
 ## Using it
 
 A dialog opens before anything is created, with a **live preview** — as soon as
-the inputs describe a solvable mechanism the skeleton appears in the viewport,
-and it updates as you change values. OK is greyed out while anything is invalid,
-and the status line at the bottom says either what is wrong or what is about to
-be built.
+the inputs describe a solvable mechanism a draft skeleton (orange lines) appears
+in the viewport, and it updates as you change values. The draft is drawn with
+transient custom graphics from the closed-form solution, so it never touches
+the document or the timeline — real geometry is only built when you press
+Generate/Update. OK is greyed out while anything is invalid, and the status
+line at the bottom says either what is wrong or what is about to be built.
 
 | Input | Meaning |
 | --- | --- |
@@ -84,9 +86,9 @@ far too slow to rebuild per keystroke; they build when you press Generate).
 **Start from the opposite side** puts A at the other end of the plane
 intersection. **Delete features from previous runs** removes everything named
 `SSM_*` so re-running iterates in place rather than piling up duplicates; it
-never touches geometry the script did not create. **Live preview** can be turned
-off if rebuilding on every change feels slow (a 3-rhombi skeleton takes about
-1.4 s).
+never touches geometry the script did not create. **Live preview** toggles the
+draft overlay; it costs almost nothing, since it is viewport graphics rather
+than a rebuild.
 
 If the origin point is not selectable, switch on the **Origin** folder in the
 browser.

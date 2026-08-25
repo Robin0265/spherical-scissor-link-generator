@@ -11,17 +11,22 @@ and the live preview both run off `parameters.solve_expressions`, which solves
 from expressions alone.
 """
 
+import math
 import traceback
 
 import adsk.core
 import adsk.fusion
 
-from . import PREFIX
-from . import audit, builder, custom_feature, parameters
+from . import PREFIX, VERSION
+from . import audit, builder, custom_feature, draft, parameters, progress
 
 _app = None
 _ui = None
 _handlers = []
+# Handlers for the currently-open dialog. Kept separate from _handlers so each
+# new dialog can drop its predecessor's five handlers instead of accumulating
+# them for the whole life of the add-in.
+_dialog_handlers = []
 
 
 def _bind(app, ui):
@@ -106,16 +111,17 @@ def _set_status(inputs, message, is_error):
     box.formattedText = template % message.replace('\n', '<br />')
 
 
-def _build(design, args, with_solids=None):
-    """with_solids overrides the dialog checkbox; the preview passes False
-    because the solid stage is far too slow to rebuild on every input change."""
+def _build(design, args, with_solids=None, reporter=None):
+    """Run the real build. Only ExecuteHandler calls this: the live preview
+    never builds - it draws draft custom graphics instead (see PreviewHandler),
+    so the document is only touched once, on Generate/Update."""
     if with_solids is None:
         with_solids = args['solids']
     return builder.build(
         design, args['centre_ent'], args['spine_plane_ent'], args['start_plane_ent'],
         overrides=args['overrides'], clockwise=args['clockwise'],
         flip_start=args['flip_start'], purge=args['purge'], pack=args['pack'],
-        with_solids=with_solids)
+        with_solids=with_solids, reporter=reporter)
 
 
 class ValidateHandler(adsk.core.ValidateInputsEventHandler):
@@ -134,13 +140,12 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
         try:
             inputs = args.inputs
             design = adsk.fusion.Design.cast(_app.activeProduct)
-            problem = _problem(design, _gather(inputs))
+            gathered = _gather(inputs)
+            problem = _problem(design, gathered)
             if problem:
                 _set_status(inputs, problem, True)
             else:
-                gathered = _gather(inputs)
                 solved = parameters.solve_expressions(design, gathered['overrides'])
-                import math
                 note = (' Solid links build on Generate (not shown in preview).'
                         if gathered['solids'] else '')
                 _set_status(inputs,
@@ -156,23 +161,47 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
 
 
 class PreviewHandler(adsk.core.CommandEventHandler):
+    """Draws the draft skeleton as custom graphics - nothing is built.
+
+    A real preview build has to write the new parameter values into the
+    document, and on a document with an existing mechanism that dirties (and
+    recomputes) every existing feature - solids included - on every
+    keystroke, which is what froze the dialog. The draft touches neither the
+    document nor the timeline; the real geometry is rebuilt once, on
+    Generate/Update.
+    """
+
     def notify(self, args):
         try:
             inputs = args.command.commandInputs
-            if not inputs.itemById('preview').value:
-                return
             design = adsk.fusion.Design.cast(_app.activeProduct)
             gathered = _gather(inputs)
-            if _problem(design, gathered) is not None:
+            if (not inputs.itemById('preview').value
+                    or _problem(design, gathered) is not None):
+                draft.clear()
                 return
-            _build(design, gathered, with_solids=False)
-            # Let the real execute run so the audit report is produced from a
-            # clean build rather than from rolled-back preview geometry.
-            # Solids are skipped here: they are far too slow for live preview.
-            args.isValidResult = False
+            draft.draw(design, gathered)
+            # isValidResult stays False: nothing was built, so the real
+            # execute must still run on OK.
         except Exception:
             # A preview must never interrupt the dialog with a dialog.
             pass
+
+
+def _log_timings(reporter):
+    """Write the stage-timing summary to the Text Commands palette.
+
+    Returns True when something was logged. Never raises: this runs in a
+    finally block and must not mask the build's own outcome.
+    """
+    try:
+        text = reporter.report()
+        if text:
+            _app.log('ssm %s\n%s' % (VERSION, text))
+            return True
+    except Exception:
+        pass
+    return False
 
 
 class ExecuteHandler(adsk.core.CommandEventHandler):
@@ -185,9 +214,25 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 return
 
             gathered = _gather(inputs)
-            report = _build(design, gathered)
+            draft.clear()
+            # The reporter keeps Fusion painted and cancellable during the
+            # build. The API is single-threaded, so this cannot run in the
+            # background - yielding between features is the available lever.
+            # It also timestamps every stage; the summary lands in the Text
+            # Commands palette even when the build fails or is cancelled.
+            reporter = progress.Reporter(_ui, CMD_NAME)
+            timed = False
+            try:
+                report = _build(design, gathered, reporter=reporter)
+            finally:
+                reporter.end()
+                timed = _log_timings(reporter)
             solved = parameters.read_solved(design)
-            _ui.messageBox(audit.format_report(report, solved), CMD_NAME)
+            message = audit.format_report(report, solved)
+            if timed:
+                message += ('\n\nStage timings were written to the Text '
+                            'Commands palette (View > Show Text Commands).')
+            _ui.messageBox(message, CMD_NAME)
         except RuntimeError as err:
             _ui.messageBox(str(err), CMD_NAME + ' - cannot build')
         except Exception:
@@ -207,6 +252,7 @@ class DestroyHandler(adsk.core.CommandEventHandler):
         self._terminate = terminate_on_destroy
 
     def notify(self, args):
+        draft.clear()
         if self._terminate:
             adsk.terminate()
 
@@ -320,13 +366,16 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 if 'solids' in opts:
                     inputs.itemById('solids').value = opts['solids']
 
+            # Only one command dialog exists at a time, so the previous
+            # dialog's handlers (its command is already destroyed) can go now.
+            del _dialog_handlers[:]
             for event, handler in ((cmd.execute, ExecuteHandler()),
                                    (cmd.executePreview, PreviewHandler()),
                                    (cmd.destroy, DestroyHandler(self._terminate)),
                                    (cmd.validateInputs, ValidateHandler()),
                                    (cmd.inputChanged, InputChangedHandler())):
                 event.add(handler)
-                _handlers.append(handler)
+                _dialog_handlers.append(handler)
 
             if edited is not None:
                 if restored == len(custom_feature.SELECTION_IDS):
@@ -390,6 +439,7 @@ def unregister(ui):
     except Exception:
         pass
     del _handlers[:]
+    del _dialog_handlers[:]
 
 
 def check_design(app, ui):

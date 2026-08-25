@@ -12,18 +12,25 @@ Levels: the link adjacency graph (links as nodes, shared joints as edges) is a
 single cycle of length 2n+2 - always even - so alternating IN/OUT around the
 cycle is always possible and puts opposite levels at every joint. n=1 needs no
 special case: the cycle is simply length 4 with no long links.
-Boss recipe (the user's method, API-adapted): a midplane at the bar's
-mid-thickness on the joint's radial line; a circle anchored to the projected
-joint point and TANGENT to the bar's slice edge (radius = bar_width/2 by
-reference, no dimension); a symmetric extrude of bar_thickness + 2*l_offset
-(the API cannot reproduce the UI's to-sketch-point extents, and the midplane is
-the boss's symmetry plane, so a symmetric extent is exact with no direction
-ambiguity); a concentric bearing_OD bore cut through-all, scoped to the body.
+Boss recipe: a midplane at the bar's mid-thickness on the joint's radial line;
+one sketch with two concentric circles anchored to the projected joint point
+and DIMENSIONED to bar_width and bearing_OD; the annular profile joins the
+boss (bore hole pre-formed) with a symmetric extrude of bar_thickness +
+2*l_offset (the midplane is the boss's symmetry plane, so a symmetric extent
+is exact with no direction ambiguity); the inner disc cuts the bore with a
+symmetric extent covering the boss band plus a margin, scoped to the body
+(bounded rather than through-all, because a through-all extent is evaluated
+against every body in the document). An earlier recipe sized the boss circle by
+tangency to the bar's projected slice edge (radius by reference, no
+dimension), which required a full design recompute per boss to settle -
+computeAll is O(entire document), so on a large assembly every boss cost
+about a minute. Dimensions make the sketch exact with no recompute at all.
 """
 import math
 import adsk.core
 import adsk.fusion
 from . import PREFIX
+from . import progress
 IN, OUT = -1, +1
 def _unit(x, y, z):
     n = math.sqrt(x * x + y * y + z * z)
@@ -156,6 +163,9 @@ def build_bar(comp, design, info, level, prm, name, C):
     sk.name = PREFIX + 'Prof_' + name
     cons = sk.geometricConstraints
     dims = sk.sketchDimensions
+    # radial reference, projected before the solve is deferred
+    proj = sk.project(radial).item(0)
+    proj.isConstruction = True
     # corners in sketch space, drawn slightly nudged then constrained
     def corner(r, side):
         wp = _p(C[0] + r*u0[0] + side*w[0], C[1] + r*u0[1] + side*w[1],
@@ -164,61 +174,65 @@ def build_bar(comp, design, info, level, prm, name, C):
     c = [corner(r_near, bw/2), corner(r_near, -bw/2),
          corner(r_far, -bw/2), corner(r_far, bw/2)]
     nudges = [(0.02, 0.015), (-0.018, 0.012), (0.016, -0.02), (-0.014, -0.017)]
-    lines = []
-    for i in range(4):
-        a = c[i]
-        b = c[(i + 1) % 4]
-        na, nb = nudges[i], nudges[(i + 1) % 4]
-        lines.append(sk.sketchCurves.sketchLines.addByTwoPoints(
-            _p(a.x + na[0], a.y + na[1]), _p(b.x + nb[0], b.y + nb[1])))
-    near_side, far_side = lines[0], lines[2]
-    # weld the loop
-    for i in range(4):
-        cons.addCoincident(lines[i].endSketchPoint,
-                           lines[(i + 1) % 4].startSketchPoint)
-    # shape
-    cons.addPerpendicular(lines[1], near_side)
-    cons.addParallel(lines[3], lines[1])
-    cons.addParallel(far_side, near_side)
-    # centre-rectangle bookkeeping: diagonals + centre point
-    d1 = sk.sketchCurves.sketchLines.addByTwoPoints(
-        _p(c[0].x + 0.03, c[0].y + 0.02), _p(c[2].x - 0.03, c[2].y - 0.02))
-    d2 = sk.sketchCurves.sketchLines.addByTwoPoints(
-        _p(c[1].x + 0.03, c[1].y - 0.02), _p(c[3].x - 0.03, c[3].y + 0.02))
-    for dline in (d1, d2):
-        dline.isConstruction = True
-    cons.addCoincident(d1.startSketchPoint, lines[0].startSketchPoint)
-    cons.addCoincident(d1.endSketchPoint, lines[2].startSketchPoint)
-    cons.addCoincident(d2.startSketchPoint, lines[1].startSketchPoint)
-    cons.addCoincident(d2.endSketchPoint, lines[3].startSketchPoint)
-    centre = sk.sketchPoints.add(_p((c[0].x + c[2].x)/2 + 0.02,
-                                    (c[0].y + c[2].y)/2 + 0.01))
-    cons.addCoincident(centre, d1)
-    cons.addCoincident(centre, d2)
-    # radial reference + offset line (origin = the on-sphere joint)
-    proj = sk.project(radial).item(0)
-    proj.isConstruction = True
-    mx, my = (c[0].x + c[1].x)/2, (c[0].y + c[1].y)/2
-    l6 = sk.sketchCurves.sketchLines.addByTwoPoints(
-        _p(0.03, 0.02), _p(mx*0.9, my*0.9))
-    l6.isConstruction = True
-    cons.addCoincident(l6.startSketchPoint, sk.originPoint)
-    cons.addCollinear(l6, proj)
-    cons.addMidPoint(l6.endSketchPoint, near_side)
-    cons.addPerpendicular(l6, near_side)
-    # dims
-    def dim(line, expr, dx, dy):
-        s1 = line.startSketchPoint.geometry
-        e1 = line.endSketchPoint.geometry
-        dm = dims.addDistanceDimension(
-            line.startSketchPoint, line.endSketchPoint,
-            adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
-            _p((s1.x + e1.x)/2 + dx, (s1.y + e1.y)/2 + dy))
-        dm.parameter.expression = expr
-    dim(near_side, 'bar_width', 0.3, 0.3)
-    dim(lines[1], 'bar_thickness', -0.3, 0.3)
-    dim(l6, 'l_offset + bearing_thickness / 2', 0.1, -0.4)
-    design.computeAll()
+    # one deferred solve at the end instead of one per constraint; releasing
+    # the deferral solves the sketch, so the check below stays valid with no
+    # full-design recompute
+    sk.isComputeDeferred = True
+    try:
+        lines = []
+        for i in range(4):
+            a = c[i]
+            b = c[(i + 1) % 4]
+            na, nb = nudges[i], nudges[(i + 1) % 4]
+            lines.append(sk.sketchCurves.sketchLines.addByTwoPoints(
+                _p(a.x + na[0], a.y + na[1]), _p(b.x + nb[0], b.y + nb[1])))
+        near_side, far_side = lines[0], lines[2]
+        # weld the loop
+        for i in range(4):
+            cons.addCoincident(lines[i].endSketchPoint,
+                               lines[(i + 1) % 4].startSketchPoint)
+        # shape
+        cons.addPerpendicular(lines[1], near_side)
+        cons.addParallel(lines[3], lines[1])
+        cons.addParallel(far_side, near_side)
+        # centre-rectangle bookkeeping: diagonals + centre point
+        d1 = sk.sketchCurves.sketchLines.addByTwoPoints(
+            _p(c[0].x + 0.03, c[0].y + 0.02), _p(c[2].x - 0.03, c[2].y - 0.02))
+        d2 = sk.sketchCurves.sketchLines.addByTwoPoints(
+            _p(c[1].x + 0.03, c[1].y - 0.02), _p(c[3].x - 0.03, c[3].y + 0.02))
+        for dline in (d1, d2):
+            dline.isConstruction = True
+        cons.addCoincident(d1.startSketchPoint, lines[0].startSketchPoint)
+        cons.addCoincident(d1.endSketchPoint, lines[2].startSketchPoint)
+        cons.addCoincident(d2.startSketchPoint, lines[1].startSketchPoint)
+        cons.addCoincident(d2.endSketchPoint, lines[3].startSketchPoint)
+        centre = sk.sketchPoints.add(_p((c[0].x + c[2].x)/2 + 0.02,
+                                        (c[0].y + c[2].y)/2 + 0.01))
+        cons.addCoincident(centre, d1)
+        cons.addCoincident(centre, d2)
+        # offset line (origin = the on-sphere joint)
+        mx, my = (c[0].x + c[1].x)/2, (c[0].y + c[1].y)/2
+        l6 = sk.sketchCurves.sketchLines.addByTwoPoints(
+            _p(0.03, 0.02), _p(mx*0.9, my*0.9))
+        l6.isConstruction = True
+        cons.addCoincident(l6.startSketchPoint, sk.originPoint)
+        cons.addCollinear(l6, proj)
+        cons.addMidPoint(l6.endSketchPoint, near_side)
+        cons.addPerpendicular(l6, near_side)
+        # dims
+        def dim(line, expr, dx, dy):
+            s1 = line.startSketchPoint.geometry
+            e1 = line.endSketchPoint.geometry
+            dm = dims.addDistanceDimension(
+                line.startSketchPoint, line.endSketchPoint,
+                adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
+                _p((s1.x + e1.x)/2 + dx, (s1.y + e1.y)/2 + dy))
+            dm.parameter.expression = expr
+        dim(near_side, 'bar_width', 0.3, 0.3)
+        dim(lines[1], 'bar_thickness', -0.3, 0.3)
+        dim(l6, 'l_offset + bearing_thickness / 2', 0.1, -0.4)
+    finally:
+        sk.isComputeDeferred = False
     if not sk.isFullyConstrained:
         raise RuntimeError(sk.name + ' is not fully constrained.')
     path = comp.features.createPath(arc, False)
@@ -235,6 +249,14 @@ OUT_MID = ('( link_Radius + l_offset + bearing_thickness / 2 + '
 IN_MID = ('( link_Radius - l_offset - bearing_thickness / 2 - '
           'bar_thickness / 2 ) / link_Radius')
 def add_boss(comp, design, body, link_sketch, u, level, prm, name, index, C):
+    """Boss + bore at one joint, from a single dimension-driven sketch.
+
+    No design.computeAll() in here, deliberately: the sketch is exact by
+    dimensions alone (see the module docstring), and a full recompute per
+    boss is what made large-document builds take a minute per boss. The
+    midplane position is still asserted, and the self-test's joint-gap audit
+    is the regression check for this recipe.
+    """
     R, bw, btk, loff, brg = (prm['R'], prm['bw'], prm['btk'], prm['loff'],
                              prm['brg'])
     radial, anchor = _radial_line(link_sketch, u, R, C)
@@ -255,76 +277,61 @@ def add_boss(comp, design, body, link_sketch, u, level, prm, name, index, C):
                            % (plane.name, r_now, want))
     boss_sk = comp.sketches.add(plane)
     boss_sk.name = '%sBoss_%s_%d' % (PREFIX, name, index)
-    cut_edges = boss_sk.projectCutEdges(body)
-    for i in range(cut_edges.count):
-        try:
-            cut_edges.item(i).isConstruction = True
-        except Exception:
-            pass
     proj_anchor = boss_sk.project(anchor).item(0)
     ga = proj_anchor.geometry
-    side_line = None
-    for i in range(cut_edges.count):
-        edge = cut_edges.item(i)
-        if edge.objectType.split('::')[-1] != 'SketchLine':
-            continue
-        s2 = edge.startSketchPoint.geometry
-        e2 = edge.endSketchPoint.geometry
-        dx, dy = e2.x - s2.x, e2.y - s2.y
-        length = math.hypot(dx, dy)
-        if length < 1e-6:
-            continue
-        dist = abs((ga.x - s2.x)*dy - (ga.y - s2.y)*dx) / length
-        if abs(dist - bw/2) < 1e-3:
-            side_line = edge
-            break
-    if side_line is None:
-        raise RuntimeError(boss_sk.name + ': no slice edge to be tangent to.')
-    circle = boss_sk.sketchCurves.sketchCircles.addByCenterRadius(
+    outer = boss_sk.sketchCurves.sketchCircles.addByCenterRadius(
         _p(ga.x + 0.06, ga.y + 0.04), bw/2 * 0.9)
-    boss_sk.geometricConstraints.addCoincident(circle.centerSketchPoint,
+    boss_sk.geometricConstraints.addCoincident(outer.centerSketchPoint,
                                                proj_anchor)
-    boss_sk.geometricConstraints.addTangent(circle, side_line)
-    design.computeAll()
-    if abs(circle.radius - bw/2) > 1e-4:
-        raise RuntimeError(boss_sk.name + ': tangent circle radius wrong.')
+    dm = boss_sk.sketchDimensions.addDiameterDimension(
+        outer, _p(ga.x + 0.8, ga.y + 0.8))
+    dm.parameter.expression = 'bar_width'
+    inner = boss_sk.sketchCurves.sketchCircles.addByCenterRadius(
+        _p(ga.x + 0.05, ga.y + 0.03), prm['bore']/2 * 0.9)
+    boss_sk.geometricConstraints.addCoincident(inner.centerSketchPoint,
+                                               proj_anchor)
+    dm = boss_sk.sketchDimensions.addDiameterDimension(
+        inner, _p(ga.x + 0.7, ga.y - 0.7))
+    dm.parameter.expression = 'bearing_OD'
     if not boss_sk.isFullyConstrained:
         raise RuntimeError(boss_sk.name + ' is not fully constrained.')
+    # two concentric circles -> two profiles: the annulus (2 loops) is the
+    # boss wall, the inner disc (1 loop) is the bore
+    annulus = disc = None
+    for i in range(boss_sk.profiles.count):
+        profile = boss_sk.profiles.item(i)
+        if profile.profileLoops.count == 2:
+            annulus = profile
+        else:
+            disc = profile
+    if annulus is None or disc is None:
+        raise RuntimeError(boss_sk.name + ': expected a disc and an annulus.')
     boss_input = comp.features.extrudeFeatures.createInput(
-        boss_sk.profiles.item(0),
-        adsk.fusion.FeatureOperations.JoinFeatureOperation)
+        annulus, adsk.fusion.FeatureOperations.JoinFeatureOperation)
     boss_input.setSymmetricExtent(
         adsk.core.ValueInput.createByString('bar_thickness + 2 * l_offset'),
         True)
     boss_input.participantBodies = [body]
     comp.features.extrudeFeatures.add(boss_input)
-    bore_sk = comp.sketches.add(plane)
-    bore_sk.name = '%sBore_%s_%d' % (PREFIX, name, index)
-    proj2 = bore_sk.project(anchor).item(0)
-    g2 = proj2.geometry
-    bore_circle = bore_sk.sketchCurves.sketchCircles.addByCenterRadius(
-        _p(g2.x + 0.05, g2.y + 0.03), prm['bore']/2 * 0.9)
-    bore_sk.geometricConstraints.addCoincident(bore_circle.centerSketchPoint,
-                                               proj2)
-    dm = bore_sk.sketchDimensions.addDiameterDimension(
-        bore_circle, _p(g2.x + 0.7, g2.y + 0.7))
-    dm.parameter.expression = 'bearing_OD'
-    if not bore_sk.isFullyConstrained:
-        raise RuntimeError(bore_sk.name + ' is not fully constrained.')
+    # Bounded cut, NOT through-all: a through-all extent is computed against
+    # every body in the document, which cost ~50 s per boss inside a large
+    # assembly. The boss band plus a margin covers everything this cut can
+    # remove from the participant body, so the result is identical.
     bore_input = comp.features.extrudeFeatures.createInput(
-        bore_sk.profiles.item(0),
-        adsk.fusion.FeatureOperations.CutFeatureOperation)
-    bore_input.setTwoSidesExtent(
-        adsk.fusion.ThroughAllExtentDefinition.create(),
-        adsk.fusion.ThroughAllExtentDefinition.create())
+        disc, adsk.fusion.FeatureOperations.CutFeatureOperation)
+    bore_input.setSymmetricExtent(
+        adsk.core.ValueInput.createByString(
+            'bar_thickness + 2 * l_offset + 1 mm'),
+        True)
     bore_input.participantBodies = [body]
     comp.features.extrudeFeatures.add(bore_input)
 # ------------------------------------------------------------- assembly --
-def build_all(design, comp, centre):
+def build_all(design, comp, centre, reporter=None):
     """Build every link body. Returns an audit report dict.
 
     `centre` is the sphere centre the skeleton was built about (frame.C); all
     radial measurements are made from it, never from the document origin.
+    `reporter` is an optional progress.Reporter (see builder.build).
     """
     prm = _params(design)
     C = (centre.x, centre.y, centre.z)
@@ -334,10 +341,19 @@ def build_all(design, comp, centre):
         info = links[name]
         short = name.replace(PREFIX + 'Link_', '')
         body = build_bar(comp, design, info, levels[name], prm, short, C)
+        progress.tick(reporter, 'Bar ' + short)
         for idx, u in enumerate(info['joints']):
             add_boss(comp, design, body, info['sketch'], u, levels[name],
                      prm, short, idx, C)
-        design.computeAll()
+            progress.tick(reporter, 'Boss %s %d' % (short, idx))
+    # One recompute for the whole stage, so the audit measures settled
+    # geometry. History: with the old tangent-driven boss recipe, thinning
+    # the mid-stage recomputes radially misplaced every boss (gap =
+    # bearing_thickness + bar_thickness) - the dimension-driven recipe has no
+    # such state dependence, and the self-test's solids check gates any
+    # change here.
+    design.computeAll()
+    progress.tick(reporter, 'Solids audited')
     return audit_joints(design, comp, prm, C)
 def audit_joints(design, comp, prm, C):
     """Every joint must mate one IN and one OUT body with a bearing_thickness

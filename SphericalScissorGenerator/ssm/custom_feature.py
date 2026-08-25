@@ -244,37 +244,50 @@ def read_state(feature, design=None):
 
 
 def _recover_selections(design):
-    """Best-effort recovery of the defining selections from the geometry."""
-    from . import PREFIX
+    """Best-effort recovery of the defining selections from the geometry.
+
+    Early-exits as soon as everything is found: this runs while the edit
+    dialog is opening, and a document full of solid-stage sketches makes a
+    blind scan of every sketch point noticeably slow.
+    """
     out = {}
     try:
         root = design.rootComponent
         components = [root] + [occ.component for occ in root.occurrences]
         for comp in components:
-            for axis in comp.constructionAxes:
-                if not axis.name.endswith('Axis_OA'):
-                    continue
-                try:
-                    one = axis.definition.planarEntityOne
-                    two = axis.definition.planarEntityTwo
-                    if one is not None and one.isValid:
-                        out.setdefault('spinePlane', one)
-                    if two is not None and two.isValid:
-                        out.setdefault('startPlane', two)
-                except Exception:
-                    pass
-            for sketch in comp.sketches:
-                if not sketch.name.endswith('Spine'):
-                    continue
-                for point in sketch.sketchPoints:
-                    if not point.isReference:
+            if len(out) == len(SELECTION_IDS):
+                break
+            if 'spinePlane' not in out or 'startPlane' not in out:
+                for axis in comp.constructionAxes:
+                    if not axis.name.endswith('Axis_OA'):
                         continue
                     try:
-                        src = point.referencedEntity
-                        if src is not None and src.isValid:
-                            out.setdefault('centrePoint', src)
+                        one = axis.definition.planarEntityOne
+                        two = axis.definition.planarEntityTwo
+                        if one is not None and one.isValid:
+                            out.setdefault('spinePlane', one)
+                        if two is not None and two.isValid:
+                            out.setdefault('startPlane', two)
                     except Exception:
                         pass
+                    if 'spinePlane' in out and 'startPlane' in out:
+                        break
+            if 'centrePoint' not in out:
+                for sketch in comp.sketches:
+                    if not sketch.name.endswith('Spine'):
+                        continue
+                    for point in sketch.sketchPoints:
+                        if not point.isReference:
+                            continue
+                        try:
+                            src = point.referencedEntity
+                            if src is not None and src.isValid:
+                                out['centrePoint'] = src
+                                break
+                        except Exception:
+                            pass
+                    if 'centrePoint' in out:
+                        break
     except Exception:
         pass
     return out

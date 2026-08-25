@@ -13,7 +13,11 @@ from . import vectors as vec
 from . import PREFIX
 
 
-def verify(design, comp, solved, frame):
+def verify(design, comp, solved, frame, timeline_from=None):
+    """`timeline_from`: first timeline index the health check should look at.
+    The builder passes where this run's features start, so the check skips
+    everything that existed before - iterating a large host document's whole
+    timeline over the COM boundary costs real seconds per run."""
     radius, alpha, n = solved['R'], solved['alpha'], solved['n']
     report = {'links': [], 'problems': [], 'n': n}
 
@@ -70,8 +74,9 @@ def verify(design, comp, solved, frame):
         except Exception:
             pass
 
-    for item in design.timeline:
-        check_item(item)
+    timeline = design.timeline
+    for i in range(timeline_from or 0, timeline.count):
+        check_item(timeline.item(i))
 
     return report
 
