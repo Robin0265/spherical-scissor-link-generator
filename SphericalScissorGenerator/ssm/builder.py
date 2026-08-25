@@ -20,6 +20,7 @@ from . import sketching as sk
 from . import frame as frame_mod
 from . import audit
 from . import custom_feature
+from . import progress
 from . import solids
 from . import PREFIX, COMPONENT_NAME
 
@@ -101,44 +102,52 @@ def build_spine(comp, plane_ent, centre_ent, axis, frame, solved):
     sweep = vec.signed_angle(centre_local, a_local, j_local)
     radius_local = math.hypot(a_local.x - centre_local.x, a_local.y - centre_local.y)
 
-    nudged_centre = vec.p(centre_local.x + sk.NUDGE, centre_local.y + sk.NUDGE * 0.8, 0)
-    angle = math.atan2(a_local.y - centre_local.y,
-                       a_local.x - centre_local.x) + math.copysign(sk.NUDGE_ANGLE, sweep)
-    nudged_a = vec.p(nudged_centre.x + radius_local * math.cos(angle),
-                     nudged_centre.y + radius_local * math.sin(angle), 0)
-    arc = sketch.sketchCurves.sketchArcs.addByCenterStartSweep(
-        nudged_centre, nudged_a, sweep)
+    # One deferred solve at the end instead of one per constraint. Everything
+    # is created nudged just off its final pose, so the single solve starts
+    # from the same near-solution guess the incremental solves did and lands
+    # on the same branch.
+    sketch.isComputeDeferred = True
+    try:
+        nudged_centre = vec.p(centre_local.x + sk.NUDGE, centre_local.y + sk.NUDGE * 0.8, 0)
+        angle = math.atan2(a_local.y - centre_local.y,
+                           a_local.x - centre_local.x) + math.copysign(sk.NUDGE_ANGLE, sweep)
+        nudged_a = vec.p(nudged_centre.x + radius_local * math.cos(angle),
+                         nudged_centre.y + radius_local * math.sin(angle), 0)
+        arc = sketch.sketchCurves.sketchArcs.addByCenterStartSweep(
+            nudged_centre, nudged_a, sweep)
 
-    if vec.dist(arc.startSketchPoint.geometry, nudged_a) <= \
-            vec.dist(arc.endSketchPoint.geometry, nudged_a):
-        a_point, j_point = arc.startSketchPoint, arc.endSketchPoint
-    else:
-        a_point, j_point = arc.endSketchPoint, arc.startSketchPoint
-
-    constraints.addCoincident(arc.centerSketchPoint, centre_point)
-    sk.radial_dim(sketch, arc, centre_local, radius_local, 'link_Radius')
-
-    spokes, node_points = [], []
-    for k in range(2 * n + 1):
-        if k == 0:
-            spoke_a = sk.spoke_to(sketch, centre_point, a_point)
-            # A lies on the plane intersection, which is what anchors the fan.
-            constraints.addCollinear(spoke_a, projected_axis)
-            spokes.append(spoke_a)
-            node_points.append(a_point)
-        elif k == 2 * n:
-            spokes.append(sk.spoke_to(sketch, centre_point, j_point))
-            node_points.append(j_point)
+        if vec.dist(arc.startSketchPoint.geometry, nudged_a) <= \
+                vec.dist(arc.endSketchPoint.geometry, nudged_a):
+            a_point, j_point = arc.startSketchPoint, arc.endSketchPoint
         else:
-            line = sk.point_on_curve_spoke(sketch, centre_point, arc, nodes[k])
-            spokes.append(line)
-            node_points.append(line.endSketchPoint)
+            a_point, j_point = arc.endSketchPoint, arc.startSketchPoint
 
-    chords = [sk.chord(sketch, node_points[k], node_points[k + 1]) for k in range(2 * n)]
-    for k in range(1, len(chords)):
-        constraints.addEqual(chords[k], chords[0])
+        constraints.addCoincident(arc.centerSketchPoint, centre_point)
+        sk.radial_dim(sketch, arc, centre_local, radius_local, 'link_Radius')
 
-    sk.angular_dim(sketch, spokes[0], spokes[1], centre_local, 'delta / 2')
+        spokes, node_points = [], []
+        for k in range(2 * n + 1):
+            if k == 0:
+                spoke_a = sk.spoke_to(sketch, centre_point, a_point)
+                # A lies on the plane intersection, which is what anchors the fan.
+                constraints.addCollinear(spoke_a, projected_axis)
+                spokes.append(spoke_a)
+                node_points.append(a_point)
+            elif k == 2 * n:
+                spokes.append(sk.spoke_to(sketch, centre_point, j_point))
+                node_points.append(j_point)
+            else:
+                line = sk.point_on_curve_spoke(sketch, centre_point, arc, nodes[k])
+                spokes.append(line)
+                node_points.append(line.endSketchPoint)
+
+        chords = [sk.chord(sketch, node_points[k], node_points[k + 1]) for k in range(2 * n)]
+        for k in range(1, len(chords)):
+            constraints.addEqual(chords[k], chords[0])
+
+        sk.angular_dim(sketch, spokes[0], spokes[1], centre_local, 'delta / 2')
+    finally:
+        sketch.isComputeDeferred = False
     return sketch, spokes, node_points
 
 
@@ -165,10 +174,14 @@ def build_seed(comp, spine_spoke_a, plane_ent, axis, frame, solved, sign, name):
     projected_a = sk.project_line(sketch, spine_spoke_a)
     centre_point, a_point = sk.split_spoke(projected_a, frame.C)
 
-    _arc, far = sk.arc_from(sketch, centre_point, a_point, frame.C,
-                            frame.joint(radius, 0.0, 0.0), pin_world)
-    spoke = sk.spoke_to(sketch, centre_point, far)
-    sk.angular_dim(sketch, projected_a, spoke, centre_point.geometry, 'alpha')
+    sketch.isComputeDeferred = True
+    try:
+        _arc, far = sk.arc_from(sketch, centre_point, a_point, frame.C,
+                                frame.joint(radius, 0.0, 0.0), pin_world)
+        spoke = sk.spoke_to(sketch, centre_point, far)
+        sk.angular_dim(sketch, projected_a, spoke, centre_point.geometry, 'alpha')
+    finally:
+        sketch.isComputeDeferred = False
     return sketch, spoke, far, pin_world
 
 
@@ -191,12 +204,16 @@ def build_long(comp, centre_ent, previous_spoke, previous_pin_point,
     centre_point, pin_point = sk.split_spoke(projected_previous, frame.C)
     _centre, node_projected = sk.split_spoke(projected_node, frame.C)
 
-    _arc, far = sk.arc_from(sketch, centre_point, pin_point, frame.C,
-                            start_world, end_world)
-    chord_in = sk.chord(sketch, pin_point, node_projected)
-    chord_out = sk.chord(sketch, node_projected, far)
-    sketch.geometricConstraints.addEqual(chord_out, chord_in)
-    spoke = sk.spoke_to(sketch, centre_point, far)
+    sketch.isComputeDeferred = True
+    try:
+        _arc, far = sk.arc_from(sketch, centre_point, pin_point, frame.C,
+                                start_world, end_world)
+        chord_in = sk.chord(sketch, pin_point, node_projected)
+        chord_out = sk.chord(sketch, node_projected, far)
+        sketch.geometricConstraints.addEqual(chord_out, chord_in)
+        spoke = sk.spoke_to(sketch, centre_point, far)
+    finally:
+        sketch.isComputeDeferred = False
     return sketch, spoke, far
 
 
@@ -217,17 +234,30 @@ def build_end(comp, centre_ent, previous_spoke, previous_pin_point,
     sk.project_line(sketch, node_spoke)
     centre_point, pin_point = sk.split_spoke(projected_previous, frame.C)
 
-    _arc, far = sk.arc_from(sketch, centre_point, pin_point, frame.C,
-                            start_world, end_world)
-    spoke = sk.spoke_to(sketch, centre_point, far)
-    sk.angular_dim(sketch, projected_previous, spoke, centre_point.geometry, 'alpha')
+    sketch.isComputeDeferred = True
+    try:
+        _arc, far = sk.arc_from(sketch, centre_point, pin_point, frame.C,
+                                start_world, end_world)
+        spoke = sk.spoke_to(sketch, centre_point, far)
+        sk.angular_dim(sketch, projected_previous, spoke, centre_point.geometry, 'alpha')
+    finally:
+        sketch.isComputeDeferred = False
     return sketch, spoke, far
 
 
 def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
           clockwise=False, flip_start=False, purge=True, pack=True,
-          with_solids=False):
+          with_solids=False, with_audit=True, reporter=None):
     """Generate the whole skeleton. Returns an audit report.
+
+    with_audit=False skips the final full-timeline recompute and the audit's
+    sketch-by-sketch re-measurement, for callers that never show the report.
+
+    `reporter` is an optional progress.Reporter. When present the build shows
+    a progress dialog and pumps the UI event loop between features, so Fusion
+    stays painted and the user can cancel; cancelling raises
+    progress.Cancelled (a RuntimeError with a readable message). The caller
+    owns reporter.end().
 
     With pack=True (the default) everything is built inside a sub-component
     named COMPONENT_NAME and the timeline range is collapsed into one named
@@ -250,17 +280,34 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     frame = frame_mod.resolve(centre_world, spine_plane_ent, start_plane_ent,
                               clockwise, flip_start)
 
+    if reporter is not None:
+        # purge + parameter write + skeleton (spine, 2 seeds, 2(n-1) longs,
+        # 2 ends) + audit + solid stage (2n+2 bars, 6n+2 bosses, audit).
+        n_planned = preview['n']
+        reporter.begin((1 if purge else 0) + 1 + (2 * n_planned + 3)
+                       + (1 if with_audit else 0)
+                       + ((8 * n_planned + 5) if with_solids else 0))
+
+    if purge:
+        purge_previous(design)
+        progress.tick(reporter, 'Previous run removed')
+    # after the old geometry is gone, stale parameters from earlier
+    # conventions can be dropped (no-op when still referenced)
+    params.remove_legacy(design)
+
+    # Parameters are written only after the purge: writing them first dirtied
+    # the old mechanism - solids included - and forced a full recompute of
+    # geometry that was about to be deleted anyway.
     params.ensure_parameters(design, overrides)
     design.computeAll()
     solved = params.read_solved(design)
     params.validate(solved)
+    progress.tick(reporter, 'Parameters written')
 
-    if purge:
-        purge_previous(design)
-        design.computeAll()
-    # after the old geometry is gone, stale parameters from earlier
-    # conventions can be dropped (no-op when still referenced)
-    params.remove_legacy(design)
+    # Everything from here down is this run's own timeline range; the audit's
+    # health check is scoped to it so a large host document's timeline is
+    # never re-scanned.
+    timeline_start = design.timeline.count
 
     pack_note = None
     comp = root
@@ -301,15 +348,20 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     except Exception:
         pass
 
+    # No computeAll between stages: each sketch is solved when its deferred
+    # compute is released, and features (planes, axes) evaluate on creation.
+    # A full-timeline recompute here would re-solve everything built so far
+    # at every stage, which is quadratic in n.
     spine_sketch, spokes, node_points = build_spine(
         comp, spine_plane_ent, centre_ent, axis, frame, solved)
-    design.computeAll()
+    progress.tick(reporter, 'Spine sketch')
 
     _sk_p, spoke_p, pin_p, _w = build_seed(
         comp, spokes[0], spine_plane_ent, axis, frame, solved, +1, 'Seed_P')
+    progress.tick(reporter, 'Link Seed_P')
     _sk_n, spoke_n, pin_n, _w = build_seed(
         comp, spokes[0], spine_plane_ent, axis, frame, solved, -1, 'Seed_N')
-    design.computeAll()
+    progress.tick(reporter, 'Link Seed_N')
 
     current = {
         +1: (spoke_p, pin_p, frame.joint(radius, delta / 2.0, +gamma)),
@@ -326,10 +378,11 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
         _sk_a, spoke_a, far_a = build_long(
             comp, centre_ent, current[+1][0], current[+1][1], node_spoke, node_point,
             frame, current[+1][2], next_n, 'Long%d_P' % i)
+        progress.tick(reporter, 'Link Long%d_P' % i)
         _sk_b, spoke_b, far_b = build_long(
             comp, centre_ent, current[-1][0], current[-1][1], node_spoke, node_point,
             frame, current[-1][2], next_p, 'Long%d_N' % i)
-        design.computeAll()
+        progress.tick(reporter, 'Link Long%d_N' % i)
         current = {+1: (spoke_b, far_b, next_p), -1: (spoke_a, far_a, next_n)}
 
     apex = frame.joint(radius, n * delta, 0.0)
@@ -337,16 +390,28 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
         build_end(comp, centre_ent, current[sign][0], current[sign][1],
                   spokes[2 * n], node_points[2 * n], frame,
                   current[sign][2], apex, tag)
-    design.computeAll()
+        progress.tick(reporter, 'Link ' + tag)
 
-    report = audit.verify(design, comp, solved, frame)
+    if with_audit:
+        # The one full recompute of the run, so the audit measures settled
+        # geometry rather than anything still marked dirty.
+        design.computeAll()
+        report = audit.verify(design, comp, solved, frame,
+                              timeline_from=timeline_start)
+        progress.tick(reporter, 'Skeleton audited')
+    else:
+        report = {'links': [], 'problems': [], 'n': solved['n'],
+                  'closure_mm': 0.0}
 
     if with_solids:
         try:
-            solid_report = solids.build_all(design, comp, frame.C)
+            solid_report = solids.build_all(design, comp, frame.C, reporter)
             report['solid_bodies'] = solid_report['bodies']
             report['solid_joints'] = solid_report['joints']
             report['problems'].extend(solid_report['problems'])
+        except progress.Cancelled:
+            # Cancel means stop, not "keep going and note a problem".
+            raise
         except Exception as err:
             report['problems'].append('solid stage failed: %s'
                                       % str(err).splitlines()[-1])
