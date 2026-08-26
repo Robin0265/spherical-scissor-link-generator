@@ -104,6 +104,18 @@ def format_report(report, solved):
         lines.append('Built into %s and collapsed into one timeline group.' % where)
         lines.append('(Custom feature unavailable - run the add-in rather than '
                      'the script to get an editable timeline node.)')
+    if report.get('ground'):
+        lines.append('The component is grounded, so it cannot be dragged off '
+                     'the centre point. Right-click it in the browser to '
+                     'unground.')
+    if report.get('hidden'):
+        lines.append('Hid %d piece(s) of scaffolding - construction planes and '
+                     'axes, the axis reference sketch%s. Nothing was deleted; '
+                     'tick the light bulbs back on in the browser to see any '
+                     'of it.'
+                     % (report['hidden'],
+                        ', and the spine and link sketches'
+                        if report.get('hid_sketches') else ''))
     if report.get('pack_note'):
         lines.append('')
         lines.append('NOTE: ' + report['pack_note'])

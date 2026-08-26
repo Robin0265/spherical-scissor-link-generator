@@ -21,7 +21,7 @@ COMPONENT_NAME = 'Spherical Scissor'
 
 # Bumped on every behavioural change. Logged with the stage timings so a
 # stale module (the add-in only reloads ssm at Stop/Run) is always visible.
-VERSION = '2026.08.24.4-scoped-audit'
+VERSION = '2026.08.26.3-bounded-axis-ref'
 
 __all__ = ['PREFIX', 'COMPONENT_NAME', 'vectors', 'parameters', 'frame',
            'sketching', 'builder', 'solids', 'draft', 'progress', 'audit']

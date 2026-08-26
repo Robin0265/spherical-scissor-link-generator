@@ -71,8 +71,8 @@ line at the bottom says either what is wrong or what is about to be built.
 The two planes do the orienting. They meet in a line; that line is joint A's
 direction, and it becomes `SSM_Axis_OA` — the same axis the seed link planes are
 rotated about by ±`lambda`. The spine sketch holds its first spoke collinear
-with it, so the start plane stays a **live driver**: move it and the whole chain
-re-orients.
+with a bounded stand-in for it (`SSM_Axis_Ref`, below), so the start plane stays
+a **live driver**: move it and the whole chain re-orients.
 
 Because the spine is a curve inside the spine plane, it can only leave the start
 plane at a right angle if the two planes are themselves perpendicular. That is
@@ -88,7 +88,10 @@ intersection. **Delete features from previous runs** removes everything named
 `SSM_*` so re-running iterates in place rather than piling up duplicates; it
 never touches geometry the script did not create. **Live preview** toggles the
 draft overlay; it costs almost nothing, since it is viewport graphics rather
-than a rebuild.
+than a rebuild. **Ground it** (on by default) pins the generated component so
+it cannot be dragged off the centre point. **Hide the spine and link sketches
+too** (off by default) clears the skeleton as well; the construction planes,
+the axis reference and the solid stage's sketches are hidden either way.
 
 If the origin point is not selectable, switch on the **Origin** folder in the
 browser.
@@ -139,6 +142,31 @@ timeline group is still applied, with a note in the report. For the packed
 sub-component, use a **Hybrid Design** or Assembly document (Document Settings
 → edit the design type).
 
+The generated component is **grounded**. This matters more than it sounds:
+every sketch in the mechanism is constrained to the centre point and the two
+planes you picked, but the occurrence holding those sketches carries its own
+transform, and that transform is a free degree of freedom. Ungrounded, the
+component looks anchored and is not — drag it in the canvas and the bodies walk
+away while the skeleton stays behind. Untick *Ground it* if you want to
+position the mechanism by hand, or right-click the component → *Ground* to
+toggle it afterwards. (If you have already dragged one, hit **Revert** in the
+POSITION panel before grounding, or you will pin it where it landed.)
+
+The scaffolding is **hidden**, not deleted — construction planes, axes, the
+axis reference sketch, and the solid stage's own profile and boss sketches. The
+spine and link sketches stay visible; tick *Hide the spine and link sketches
+too* if you want those gone as well. Nothing is deleted either way, so the
+light bulbs in the browser bring any of it back.
+
+`SSM_Axis_Ref` is why the spine is worth looking at. The spine has to be
+oriented by `SSM_Axis_OA` to keep the start plane a live driver, but projecting
+a *construction axis* into a sketch gives a reference line whose length Fusion
+picks — and it ran well past `link_Radius` on both sides of the centre.
+Projecting a *sketch line* brings it across at its own length instead. So the
+axis is projected once, into a hidden sketch of its own, a `link_Radius`-long
+line is constrained along it there, and the spine projects that. Same
+live-driver chain, no line past the radius.
+
 The mechanism stays fully live either way — the parameters below are ordinary
 user parameters, so editing them in **Modify → Change Parameters** re-solves
 everything inside the package. (This is the pragmatic stand-in for a true
@@ -146,6 +174,7 @@ everything inside the package. (This is the pragmatic stand-in for a true
 
 ```
 SSM_Axis_OA          spine plane x start plane: joint A's direction
+SSM_Axis_Ref         hidden: a link_Radius line along OA, for the spine
 SSM_Spine            spine arc (span_target) + 2n+1 radial fan
 SSM_Plane_Seed_P/N   spine plane rotated by +/- lambda about OA
 SSM_Link_Seed_P/N    the two mirror-image alpha links A -> P1
@@ -359,7 +388,16 @@ Input validation
 Its audit re-measures the geometry independently rather than trusting the
 generator's own report, so the two have to agree for a pass.
 
-**3. Debug with breakpoints.** In the Scripts and Add-Ins dialog select the
+**3. Offline smoke test.** `python3 tools/smoke_test.py` — runs anywhere, no
+Fusion needed. It covers only `builder.hide_scaffolding` and
+`builder.ground_occurrence`, which are the two helpers that merely read `.name`
+and write `.isLightBulbOn` / `.isGrounded`, so plain objects can stand in for
+the API's. Its value is the refusal paths: an entity that raises on the
+light-bulb write, and an occurrence whose `isGrounded` silently ignores it —
+both awkward to stage in a real document, and both places where a
+"hidden"/"grounded" claim could quietly become false.
+
+**4. Debug with breakpoints.** In the Scripts and Add-Ins dialog select the
 script and click **Edit**. Fusion opens it in VS Code, installs the
 `ms-python.python` extension the first time, and drops its own `launch.json`
 into the *script* folder. Set breakpoints, then **Run → Start Debugging** (F5).

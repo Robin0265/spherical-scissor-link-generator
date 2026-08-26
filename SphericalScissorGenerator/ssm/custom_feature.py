@@ -95,11 +95,11 @@ def is_available():
 # edit path can map them back without a translation table.
 SELECTION_IDS = ('centrePoint', 'spinePlane', 'startPlane')
 ATTR_GROUP = 'SSM'
-OPTION_IDS = ('clockwise', 'flip_start', 'solids')
+OPTION_IDS = ('clockwise', 'flip_start', 'solids', 'ground', 'hide_skeleton')
 
 
 def wrap(design, root, component, start_index, solved, overrides,
-         selections=None, options=None):
+         selections=None, options=None, component_start=None):
     """Group the timeline range into one custom feature.
 
     `selections` ({'centrePoint': entity, 'spinePlane': ..., 'startPlane': ...})
@@ -114,6 +114,12 @@ def wrap(design, root, component, start_index, solved, overrides,
     Which component owns the feature is not obvious for a packed build: the
     sketches live in the sub-component while the occurrence that created it
     lives in the root timeline. Both are attempted, widest first.
+
+    `component_start` is the first timeline index that belongs to the
+    sub-component itself. The caller knows it; this cannot be inferred as
+    start_index + 1, because the occurrence node may be followed by other
+    root-owned nodes (grounding writes one) before the component's own first
+    feature.
     """
     definition = STORE.get('definition')
     if definition is None:
@@ -131,8 +137,11 @@ def wrap(design, root, component, start_index, solved, overrides,
     if root is not None:
         attempts.append(('root', root, start_index))
     if component is not None and component is not root:
-        # Skip the occurrence node: start at the first feature inside it.
-        attempts.append(('component', component, min(start_index + 1, timeline.count - 1)))
+        # Skip the occurrence node and anything else root-owned above it.
+        first_inside = (component_start if component_start is not None
+                        else start_index + 1)
+        attempts.append(('component', component,
+                         min(first_inside, timeline.count - 1)))
 
     for _label, owner, first_index in attempts:
         feature = _try_wrap(timeline, owner, definition, first_index, overrides,

@@ -203,6 +203,78 @@ def run(context):
                         report['problems'] or 'none',
                         'ok' if ok_solids else 'FAIL'))
 
+        # 8. the packed component must be pinned, and the scaffolding hidden
+        lines.append('')
+        lines.append('Anchoring & visibility')
+
+        def packed_occurrence():
+            for occ in root.occurrences:
+                if occ.component.name == ssm.COMPONENT_NAME:
+                    return occ
+            return None
+
+        def lit(collection):
+            return [item.name for item in collection
+                    if item.name.startswith(prefix) and item.isLightBulbOn]
+
+        # default: grounded, spine and links visible, everything else not
+        report = build(overrides={'n': '2'}, purge=True, with_solids=True)
+        occ = packed_occurrence()
+        grounded = bool(occ and (getattr(occ, 'isGrounded', False)
+                                 or getattr(occ, 'isGroundToParent', False)))
+        comp = _build_component(design, ssm.COMPONENT_NAME)
+        lit_planes = lit(comp.constructionPlanes) + lit(comp.constructionAxes)
+        lit_sketches = lit(comp.sketches)
+        strays = [n for n in lit_sketches
+                  if not (n == prefix + 'Spine' or n.startswith(prefix + 'Link_'))]
+        ok_default = (grounded and report.get('ground') and not lit_planes
+                      and (prefix + 'Spine') in lit_sketches and not strays)
+        failures += 0 if ok_default else 1
+        lines.append('  default        grounded=%s  lit planes=%d  lit sketches=%d '
+                     'strays=%s  %s'
+                     % (grounded, len(lit_planes), len(lit_sketches),
+                        strays[:2] or 'none', 'ok' if ok_default else 'FAIL'))
+
+        # the spine must no longer carry a reference line running past the
+        # radius: SSM_Axis_OA is projected into SSM_Axis_Ref, and the spine
+        # projects that bounded line instead
+        radius = design.userParameters.itemByName('link_Radius').value
+        spine = None
+        for s in comp.sketches:
+            if s.name == prefix + 'Spine':
+                spine = s
+        longest = 0.0
+        for ln in (spine.sketchCurves.sketchLines if spine else []):
+            a = ln.startSketchPoint.geometry
+            b = ln.endSketchPoint.geometry
+            longest = max(longest, math.hypot(b.x - a.x, b.y - a.y))
+        ok_bounded = spine is not None and longest <= radius * 1.001
+        failures += 0 if ok_bounded else 1
+        lines.append('  spine bounded  longest line %.2f mm of %.2f mm  %s'
+                     % (longest * 10, radius * 10,
+                        'ok' if ok_bounded else 'FAIL'))
+
+        # opting in hides the skeleton as well
+        build(overrides={'n': '2'}, purge=True, with_solids=True,
+              hide_skeleton=True)
+        comp = _build_component(design, ssm.COMPONENT_NAME)
+        still_lit = lit(comp.sketches) + lit(comp.constructionPlanes)
+        failures += 0 if not still_lit else 1
+        lines.append('  hide_skeleton  lit %d  %s'
+                     % (len(still_lit),
+                        'ok' if not still_lit else 'FAIL %s' % still_lit[:3]))
+
+        # ...and must not be sticky: the next default build shows it again
+        build(overrides={'n': '2'}, purge=True, with_solids=True, ground=False)
+        occ = packed_occurrence()
+        free = bool(occ and not getattr(occ, 'isGrounded', False))
+        comp = _build_component(design, ssm.COMPONENT_NAME)
+        shown = len(lit(comp.sketches))
+        ok_optout = free and shown > 0
+        failures += 0 if ok_optout else 1
+        lines.append('  ground=False   ungrounded=%s  lit sketches=%d  %s'
+                     % (free, shown, 'ok' if ok_optout else 'FAIL'))
+
         header = 'ALL CHECKS PASSED' if failures == 0 else '%d CHECK(S) FAILED' % failures
         text = header + '\n\n' + '\n'.join(lines)
         print(text)

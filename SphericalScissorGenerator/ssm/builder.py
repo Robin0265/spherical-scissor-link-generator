@@ -76,22 +76,84 @@ def purge_previous(design):
     return removed
 
 
-def build_spine(comp, plane_ent, centre_ent, axis, frame, solved):
+AXIS_REF_NAME = PREFIX + 'Axis_Ref'
+
+
+def build_axis_reference(comp, plane_ent, centre_ent, axis, frame, solved):
+    """A link_Radius-long stand-in for SSM_Axis_OA, in a sketch of its own.
+
+    Projecting a *construction axis* into a sketch gives a reference line whose
+    length Fusion picks, and it ran well past link_Radius on both sides of the
+    centre - the one piece of the skeleton nobody wants to look at. Projecting
+    a *sketch line* brings it across at its own length instead. So the axis is
+    projected exactly once, here, in a sketch that stays hidden, and a
+    radius-long line is constrained along it; the spine projects that.
+
+    The live-driver chain is unchanged - line -> projected axis -> the two
+    planes the user picked - so moving the start plane still re-orients the
+    whole fan.
+    """
+    sketch = sk.new_sketch(comp, plane_ent, AXIS_REF_NAME)
+    centre_point = sketch.project(centre_ent).item(0)
+    axis_ref = sketch.project(axis).item(0)
+    axis_ref.isConstruction = True
+
+    centre_local = sketch.modelToSketchSpace(frame.C)
+    a_local = sketch.modelToSketchSpace(frame.joint(solved['R'], 0.0, 0.0))
+
+    sketch.isComputeDeferred = True
+    try:
+        line = sketch.sketchCurves.sketchLines.addByTwoPoints(
+            vec.p(centre_local.x + sk.NUDGE, centre_local.y + sk.NUDGE * 0.7, 0),
+            vec.p(a_local.x + sk.NUDGE, a_local.y + sk.NUDGE * 0.9, 0))
+        line.isConstruction = True
+        constraints = sketch.geometricConstraints
+        constraints.addCoincident(line.startSketchPoint, centre_point)
+        # Point-on-line rather than collinear: the far end still needs a
+        # length, and "on the axis + link_Radius from the centre" has two
+        # solutions, so the nudge above is what puts the solver on the right
+        # one - the same technique the link arcs use.
+        constraints.addCoincident(line.endSketchPoint, axis_ref)
+        dimension = sketch.sketchDimensions.addDistanceDimension(
+            line.startSketchPoint, line.endSketchPoint,
+            adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
+            vec.p((centre_local.x + a_local.x) / 2 + 0.4,
+                  (centre_local.y + a_local.y) / 2 + 0.4, 0))
+        dimension.parameter.expression = 'link_Radius'
+    finally:
+        sketch.isComputeDeferred = False
+
+    # "On the axis, link_Radius from the centre" has two solutions, one at
+    # each end of OA. The nudge should land on joint A's, but a silent flip
+    # here would build a correctly-formed mechanism pointing the wrong way -
+    # closure and link lengths would all still check out - so it is asserted
+    # rather than trusted.
+    landed = line.endSketchPoint.worldGeometry
+    want = frame.joint(solved['R'], 0.0, 0.0)
+    off = vec.dist(landed, want)
+    if off > 1e-4:
+        raise RuntimeError(
+            'The axis reference solved onto the wrong end of OA (%.4f mm from '
+            'joint A). Try "Start from the opposite side".' % (off * 10.0))
+    return sketch, line
+
+
+def build_spine(comp, plane_ent, centre_ent, axis_line, frame, solved):
     """Spine sketch: the span_target arc plus the 2n+1 radial fan.
 
     Only one angular dimension is needed; the equal-chord chain propagates the
     delta/2 spacing to every node, and the arc's sweep follows from it.
 
-    The fan's absolute orientation comes from `axis`, the line where the start
-    plane meets the spine plane. Projecting it in and holding the first spoke
-    collinear with it keeps the start plane a live driver: move that plane and
-    the whole chain re-orients.
+    The fan's absolute orientation comes from `axis_line`, the bounded stand-in
+    build_axis_reference put along the plane intersection. Projecting it in and
+    holding the first spoke collinear with it keeps the start plane a live
+    driver: move that plane and the whole chain re-orients.
     """
     sketch = sk.new_sketch(comp, plane_ent, PREFIX + 'Spine')
     constraints = sketch.geometricConstraints
 
     centre_point = sketch.project(centre_ent).item(0)
-    projected_axis = sketch.project(axis).item(0)
+    projected_axis = sketch.project(axis_line).item(0)
     projected_axis.isConstruction = True
     radius, delta, n = solved['R'], solved['delta'], solved['n']
     nodes = [frame.joint(radius, k * delta / 2.0, 0.0) for k in range(2 * n + 1)]
@@ -245,9 +307,85 @@ def build_end(comp, centre_ent, previous_spoke, previous_pin_point,
     return sketch, spoke, far
 
 
+def _set_bulb(item, on):
+    """Light bulb on/off, tolerating entities that refuse it. True if changed."""
+    try:
+        if item.isLightBulbOn == on:
+            return False
+        item.isLightBulbOn = on
+        return True
+    except Exception:
+        return False
+
+
+def _is_skeleton_sketch(name):
+    """The two sketch families worth looking at: the spine and the links.
+
+    Everything else the run creates - the axis reference, and the solid stage's
+    profile and boss sketches - is scaffolding that is always hidden, whatever
+    the skeleton option says. Turning those back on would bury the model in
+    rectangles and bore circles.
+    """
+    return (name == PREFIX + 'Spine'
+            or name.startswith(PREFIX + 'Link_'))
+
+
+def hide_scaffolding(comp, hide_sketches):
+    """Turn the light bulbs off on everything this run created as scaffolding.
+
+    Construction planes, axes and points always go: they only exist to carry
+    the sketches, and the 2n+2 link planes are pure clutter once the links are
+    drawn on them. So do the non-skeleton sketches (see _is_skeleton_sketch).
+
+    Only the spine and link sketches follow `hide_sketches`, and they are now
+    safe to leave visible: the over-long projected SSM_Axis_OA line that used
+    to make the spine unreadable lives in SSM_Axis_Ref instead, which is never
+    shown (see build_axis_reference).
+
+    Nothing is deleted - ticking the light bulbs back on in the browser brings
+    any of it back.
+    """
+    hidden = 0
+    for collection in (comp.constructionPlanes, comp.constructionAxes,
+                       comp.constructionPoints):
+        for item in collection:
+            if item.name.startswith(PREFIX) and _set_bulb(item, False):
+                hidden += 1
+    for sketch in comp.sketches:
+        if not sketch.name.startswith(PREFIX):
+            continue
+        show = _is_skeleton_sketch(sketch.name) and not hide_sketches
+        if _set_bulb(sketch, show) and not show:
+            hidden += 1
+    return hidden
+
+
+def ground_occurrence(occurrence):
+    """Pin the packed component so it cannot be dragged off its anchor.
+
+    Every sketch inside the mechanism is tied to the centre point and the two
+    planes the user selected, but the occurrence that holds them carries its
+    own transform, and that transform is a free degree of freedom: dragging the
+    component in the canvas moves the bodies while the skeleton stays behind.
+    Grounding is what removes it.
+
+    Returns True only if the occurrence reports itself grounded afterwards, so
+    a property that silently refuses the write is never mistaken for success.
+    """
+    for attribute in ('isGrounded', 'isGroundToParent'):
+        try:
+            setattr(occurrence, attribute, True)
+            if getattr(occurrence, attribute):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
           clockwise=False, flip_start=False, purge=True, pack=True,
-          with_solids=False, with_audit=True, reporter=None):
+          with_solids=False, with_audit=True, reporter=None,
+          ground=True, hide_skeleton=False):
     """Generate the whole skeleton. Returns an audit report.
 
     with_audit=False skips the final full-timeline recompute and the audit's
@@ -267,6 +405,16 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     with_solids=True additionally builds the physical link bodies (bars,
     bosses, bores) via the solids module. A solids failure is reported in the
     returned audit rather than raised, so a correct skeleton is never lost.
+
+    ground=True (the default) grounds the packed occurrence, so the mechanism
+    cannot be dragged away from the centre it was built about. Ungrounded it
+    only looks anchored: the sketches are tied to the user's selections while
+    the occurrence transform above them stays free.
+
+    hide_skeleton=True additionally hides the spine and link sketches. It
+    defaults to False: construction planes, the axis reference and the solid
+    stage's own sketches are hidden regardless, which leaves the spine arc and
+    its fan - which are worth seeing - and nothing else.
 
     Raises RuntimeError with a readable reason for any unusable input; the
     document is left untouched when that happens, because everything is checked
@@ -312,6 +460,8 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     pack_note = None
     comp = root
     group_start = None
+    occurrence = None
+    grounded = False
     if pack:
         # Part Design documents (new in 2026) allow exactly one component, so
         # packing into a sub-component is impossible there. Fall back to
@@ -332,6 +482,18 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
             comp = occurrence.component
             comp.name = COMPONENT_NAME
             group_start = occurrence.timelineObject.index
+            # Grounding writes a timeline node of its own, so it has to happen
+            # here rather than at the end of the build: after the group (or the
+            # custom feature) has claimed this run's range, that node lands
+            # outside it and a packed build stops being a single timeline
+            # entry. Created now, it sits at group_start + 1 and is absorbed.
+            if ground:
+                grounded = ground_occurrence(occurrence)
+
+    # Everything from here belongs to `comp`; the occurrence node and the
+    # ground node above it belong to the root. custom_feature.wrap needs the
+    # difference when it tries to hang the feature off the sub-component.
+    component_start = design.timeline.count
 
     radius, delta, gamma, n = solved['R'], solved['delta'], solved['gamma'], solved['n']
 
@@ -352,8 +514,10 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     # compute is released, and features (planes, axes) evaluate on creation.
     # A full-timeline recompute here would re-solve everything built so far
     # at every stage, which is quadratic in n.
-    spine_sketch, spokes, node_points = build_spine(
+    _axis_sketch, axis_line = build_axis_reference(
         comp, spine_plane_ent, centre_ent, axis, frame, solved)
+    spine_sketch, spokes, node_points = build_spine(
+        comp, spine_plane_ent, centre_ent, axis_line, frame, solved)
     progress.tick(reporter, 'Spine sketch')
 
     _sk_p, spoke_p, pin_p, _w = build_seed(
@@ -429,7 +593,9 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
                         'spinePlane': spine_plane_ent,
                         'startPlane': start_plane_ent},
             options={'clockwise': clockwise, 'flip_start': flip_start,
-                     'solids': with_solids})
+                     'solids': with_solids, 'ground': ground,
+                     'hide_skeleton': hide_skeleton},
+            component_start=component_start)
         if feature is not None:
             report['custom_feature'] = feature.name
             report['grouped'] = True
@@ -440,6 +606,22 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
             group.name = COMPONENT_NAME
             group.isCollapsed = True
             report['grouped'] = True
+
+    # Visibility is display state, not a feature: it writes nothing to the
+    # timeline, so unlike the grounding above it can safely happen last.
+    hidden = hide_scaffolding(comp, hide_skeleton)
+    if hidden:
+        report['hidden'] = hidden
+        report['hid_sketches'] = hide_skeleton
+
+    if occurrence is not None and ground:
+        if grounded:
+            report['ground'] = True
+        else:
+            report['problems'].append(
+                'could not ground the component - right-click "%s" in the '
+                'browser and choose Ground, or it can be dragged off its '
+                'anchor.' % COMPONENT_NAME)
 
     if pack_note:
         report['pack_note'] = pack_note

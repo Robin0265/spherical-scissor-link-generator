@@ -74,7 +74,15 @@ def _gather(inputs):
         'purge': inputs.itemById('purge').value,
         'pack': inputs.itemById('pack').value,
         'solids': inputs.itemById('solids').value,
+        'ground': _flag(inputs, 'ground', True),
+        'hide_skeleton': _flag(inputs, 'hideSkeleton', False),
     }
+
+
+def _flag(inputs, input_id, fallback):
+    """A checkbox's value, tolerating a dialog that predates it."""
+    field = inputs.itemById(input_id)
+    return fallback if field is None else field.value
 
 
 def _problem(design, args):
@@ -121,7 +129,8 @@ def _build(design, args, with_solids=None, reporter=None):
         design, args['centre_ent'], args['spine_plane_ent'], args['start_plane_ent'],
         overrides=args['overrides'], clockwise=args['clockwise'],
         flip_start=args['flip_start'], purge=args['purge'], pack=args['pack'],
-        with_solids=with_solids, reporter=reporter)
+        with_solids=with_solids, reporter=reporter,
+        ground=args['ground'], hide_skeleton=args['hide_skeleton'])
 
 
 class ValidateHandler(adsk.core.ValidateInputsEventHandler):
@@ -334,6 +343,12 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             options.children.addBoolValueInput(
                 'pack', 'Pack into one component + timeline group', True, '', True)
             options.children.addBoolValueInput(
+                'ground', 'Ground it (cannot be dragged off the centre)',
+                True, '', True)
+            options.children.addBoolValueInput(
+                'hideSkeleton', 'Hide the spine and link sketches too',
+                True, '', False)
+            options.children.addBoolValueInput(
                 'purge', 'Delete features from previous runs (%s*)' % PREFIX,
                 True, '', True)
             options.children.addBoolValueInput(
@@ -365,6 +380,11 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                     inputs.itemById('flipStart').value = opts['flip_start']
                 if 'solids' in opts:
                     inputs.itemById('solids').value = opts['solids']
+                for key, input_id in (('ground', 'ground'),
+                                      ('hide_skeleton', 'hideSkeleton')):
+                    field = inputs.itemById(input_id)
+                    if key in opts and field is not None:
+                        field.value = opts[key]
 
             # Only one command dialog exists at a time, so the previous
             # dialog's handlers (its command is already destroyed) can go now.
