@@ -93,6 +93,65 @@ than a rebuild.
 If the origin point is not selectable, switch on the **Origin** folder in the
 browser.
 
+## McMaster-Carr hardware autofill
+
+The joints are designed around real hardware: a thrust bearing sits in the gap
+between mating bosses, and a press-fit bushing lines each boss bore. The
+**McMaster-Carr hardware** group in the dialog takes the two part numbers and a
+**Fetch** button; fetching looks the parts up and fills the driving parameters
+from their catalogue dimensions:
+
+| Parameter | Source | Rule |
+| --- | --- | --- |
+| `bearing_OD` | bushing OD | direct copy — the boss bore takes the press-fit bushing |
+| `bearing_thickness` | thrust bearing thickness | direct copy — the boss gap |
+| `l_offset` | bushing length | `(length − bar_thickness) / 2`, so the boss holds the bushing flush |
+
+The fields stay editable — autofill sets values, it does not lock them — and
+editing `bar_thickness` after a fetch re-derives `l_offset` so the boss keeps
+matching the bushing. Impossible combinations are rejected with the reason
+(bushing shorter than the bar), and suspect ones get a warning in the status
+line (bearing OD overhanging the boss, bearing bore smaller than the bushing
+bore). Generate then reports a hardware BOM — one bearing and two bushings per
+joint, `3n+1` joints (`2n+2` around the link cycle plus `n−1` spine
+crossings) — and remembers the part numbers in the document, so an edit
+dialog offers them again.
+
+The lookup uses the official **McMaster-Carr Product Information API**
+(https://www.mcmaster.com/help/api). It is free but gated: email
+`eprocurement@mcmaster.com` once to register, and McMaster sends a client
+certificate and password. Describe them in `mcmaster_credentials.json` in the
+repo root (or your home folder) — gitignored, never commit it:
+
+```json
+{
+  "certificate": "C:/path/to/mcmaster-client-cert.pem",
+  "certificate_password": "the password McMaster sent with it",
+  "username": "you@example.com",
+  "password": "your mcmaster.com password"
+}
+```
+
+(If the certificate arrives as a `.pfx`, convert it once:
+`openssl pkcs12 -in cert.pfx -out cert.pem -nodes`.)
+
+Why not scrape the site anonymously, like the built-in *Insert McMaster-Carr
+Component* browser does? Because that path only works for a real interactive
+browser: the site's data endpoints validate per-request tokens minted by its
+own JavaScript (`X-MCM-T-ID` and friends) and answer 403 without them. That is
+deliberate bot protection, and this tool does not try to defeat it — the
+sanctioned API is the automation path McMaster actually offers.
+
+Every fetched spec sheet and STEP file lands in `.mcmaster-cache/`
+(gitignored), keyed by part number, so re-fetching a cached part needs no
+network and no credentials — one person with API access can warm the cache for
+a whole lab. Without credentials and without a cache hit, the status line says
+so and the dimension fields simply stay manual.
+
+The fetch itself runs on a worker thread (the Fusion API is single-threaded,
+so the reply is marshalled back through a custom event) — the dialog never
+freezes on a slow connection.
+
 ## Layout
 
 The entry script is the Fusion command dialog and nothing else; the geometry
@@ -108,6 +167,7 @@ SphericalScissorGenerator/
     ├── frame.py        resolves eA / eF / eN from the two plane selections
     ├── sketching.py    nudged arcs, spokes, chords, dimensions
     ├── builder.py      the link chain
+    ├── mcmaster.py     McMaster-Carr part lookup for the hardware parameters
     └── audit.py        independent re-measurement of what was built
 ```
 

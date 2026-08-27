@@ -232,3 +232,8 @@ typings/
 # uses the legacy "type": "python" schema. Use the repo-root .vscode/launch.json.
 SphericalScissorGenerator/.vscode/
 !SphericalScissorAddIn/*.manifest
+
+# McMaster-Carr API credentials (client certificate path + login) and the
+# fetched spec/STEP cache - machine-local, never commit either.
+mcmaster_credentials.json
+.mcmaster-cache/

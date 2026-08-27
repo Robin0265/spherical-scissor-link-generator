@@ -12,6 +12,7 @@ here:
     draft       custom-graphics draft skeleton for the dialog's live preview
     progress    progress dialog + UI pumping for the long build
     audit       independent re-measurement of what was built
+    mcmaster    McMaster-Carr part lookup for the hardware parameters
 """
 
 PREFIX = 'SSM_'
@@ -21,7 +22,8 @@ COMPONENT_NAME = 'Spherical Scissor'
 
 # Bumped on every behavioural change. Logged with the stage timings so a
 # stale module (the add-in only reloads ssm at Stop/Run) is always visible.
-VERSION = '2026.08.24.4-scoped-audit'
+VERSION = '2026.08.27.1-mcmaster-autofill'
 
 __all__ = ['PREFIX', 'COMPONENT_NAME', 'vectors', 'parameters', 'frame',
-           'sketching', 'builder', 'solids', 'draft', 'progress', 'audit']
+           'sketching', 'builder', 'solids', 'draft', 'progress', 'audit',
+           'mcmaster']
