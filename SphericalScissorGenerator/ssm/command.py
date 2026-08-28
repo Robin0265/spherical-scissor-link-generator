@@ -267,9 +267,13 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
             inputs = args.inputs
             changed = args.input.id if args.input else ''
             if changed == 'mcmFetch':
-                # The bool input is a button: undo the toggle, run the fetch.
-                inputs.itemById('mcmFetch').value = False
-                _start_fetch(inputs)
+                # The bool input is a button: the click flips it True, and
+                # resetting it fires this event once more with False, so only
+                # the True edge fetches - reacting to both would fetch twice.
+                button = inputs.itemById('mcmFetch')
+                if button.value:
+                    button.value = False
+                    _start_fetch(inputs)
                 return
             if changed in ('mcmBearing', 'mcmBushing'):
                 return  # typing a part number is not a geometry change
