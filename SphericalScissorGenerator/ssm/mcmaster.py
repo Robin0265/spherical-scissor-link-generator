@@ -119,6 +119,18 @@ def cached_step(part_number):
     return path if os.path.isfile(path) else None
 
 
+def cached_product(part_number):
+    """The cached API spec JSON for a part, or None."""
+    path = os.path.join(cache_dir(), part_number.upper() + '.json')
+    if os.path.isfile(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+    return None
+
+
 def downloads_dirs():
     """Every folder a browser download can land in, most authoritative first.
 
@@ -510,14 +522,13 @@ def fetch_hardware(part_number, kind, local_only=False):
 
     config = None if local_only else load_config()
     if config is not None:
+        # Metadata only - the STEP is deliberately NOT downloaded here.
+        # Fetch answers "what are the dimensions"; the CAD is acquired by
+        # ensure_step at Generate, where the import actually needs it.
         product = _api_product(part_number)
         extract = extract_bearing if kind == 'bearing' else extract_bushing
         dims = extract(product)
         save_dims(part_number, dims)
-        try:
-            _api_step(part_number, product)
-        except Exception:
-            pass  # specs without CAD are still worth having
         return dims, 'api'
 
     step = cached_step(part_number)
@@ -540,6 +551,35 @@ def fetch_hardware(part_number, kind, local_only=False):
         'automatically (press Fetch or Generate). Automatic download instead '
         'needs the free McMaster API - see the README.'
         % (kind.capitalize(), part_number, part_url(part_number),
+           ' or '.join(downloads_dirs()) or 'Downloads'))
+
+
+def ensure_step(part_number):
+    """The part's STEP file in the cache, acquiring it if needed.
+
+    Order: already cached -> a file the user downloaded (copied into the
+    cache) -> the API (when configured). This runs at Generate, which is the
+    moment the CAD is actually needed - Fetch never touches CAD.
+    """
+    part_number = part_number.strip().upper()
+    step = cached_step(part_number)
+    if step is not None:
+        return step
+    downloaded = find_downloaded_step(part_number)
+    if downloaded is not None:
+        step = os.path.join(cache_dir(), part_number + '.step')
+        shutil.copyfile(downloaded, step)
+        return step
+    if load_config() is not None:
+        product = cached_product(part_number)
+        if product is None:
+            product = _api_product(part_number)
+        return _api_step(part_number, product)
+    raise McMasterError(
+        '%s: no STEP available. Download it from %s into %s and re-run '
+        'Generate, or configure the free McMaster API for automatic '
+        'download (see the README).'
+        % (part_number, part_url(part_number),
            ' or '.join(downloads_dirs()) or 'Downloads'))
 
 

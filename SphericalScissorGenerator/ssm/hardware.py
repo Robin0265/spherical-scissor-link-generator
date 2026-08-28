@@ -46,13 +46,29 @@ def joint_sites(solved):
 
 
 def _import_step(design, comp, path, name):
-    """Import a STEP once into comp; returns the new occurrence."""
+    """Import a STEP once into comp; returns the new occurrence.
+
+    The import wraps its timeline items in a group of its own, and Fusion
+    refuses overlapping groups - which would make the build's final
+    pack-into-one-group step fail with InternalValidationError. Ungroup it
+    (contents stay) so the whole run can still collapse into one entry.
+    """
     manager = adsk.core.Application.get().importManager
     options = manager.createSTEPImportOptions(path)
+    before_items = design.timeline.count
     before = comp.occurrences.count
     manager.importToTarget(options, comp)
     if comp.occurrences.count <= before:
         raise RuntimeError('%s imported no component.' % path)
+    for index in range(before_items, design.timeline.count):
+        item = design.timeline.item(index)
+        if item.isGroup:
+            group = adsk.fusion.TimelineGroup.cast(item)
+            if group is not None:
+                try:
+                    group.deleteMe(False)  # ungroup, keep the contents
+                except Exception:
+                    pass
     occurrence = comp.occurrences.item(comp.occurrences.count - 1)
     occurrence.component.name = name
     return occurrence
@@ -143,19 +159,26 @@ def place(design, comp, frame, solved, hardware, reporter=None):
         part_number = (hardware.get(kind + '_pn') or '').strip().upper()
         if not part_number:
             continue
-        step = mcmaster.cached_step(part_number)
-        if step is None:
-            report['problems'].append(
-                'hardware: no cached STEP for %s %s - press Fetch in the '
-                'dialog first.' % (kind, part_number))
+        try:
+            # Acquires the CAD if it is not cached yet: a finished download,
+            # or the API when configured. Fetch never does this - Generate
+            # is where the file is actually needed.
+            step = mcmaster.ensure_step(part_number)
+        except mcmaster.McMasterError as err:
+            report['problems'].append('HARDWARE NOT IMPORTED - %s' % err)
             continue
         occurrence = _import_step(design, comp, step,
                                   PREFIX + 'Hw_' + part_number)
         part = occurrence.component
         axis_local, centre_local = _part_frame(part)
 
+        # Every placement is a NEW occurrence with its transform given at
+        # creation, and the import's own occurrence is deleted afterwards.
+        # Moving the imported occurrence instead (a transform override)
+        # needs a root proxy plus a snapshot, and Fusion rolls the override
+        # back when the next import touches the timeline - creation
+        # transforms are definitional and survive everything.
         placed = 0
-        first = occurrence
         for phi, elevation in sites:
             joint = frame.joint(radius, phi, elevation)
             radial = adsk.core.Vector3D.create(
@@ -167,20 +190,17 @@ def place(design, comp, frame, solved, hardware, reporter=None):
                     centre.y + radial.y * (radius + offset),
                     centre.z + radial.z * (radius + offset))
                 matrix = _transform(axis_local, centre_local, radial, target)
-                if first is not None:
-                    first.transform2 = matrix
-                    first = None
-                else:
-                    comp.occurrences.addExistingComponent(part, matrix)
+                comp.occurrences.addExistingComponent(part, matrix)
                 placed += 1
                 progress.tick(reporter, '%s %s at joint' % (kind, part_number))
+        try:
+            occurrence.deleteMe()
+        except Exception:
+            # A stray copy at the import pose is cosmetic; hide it rather
+            # than fail a build that has already placed everything.
+            try:
+                occurrence.isLightBulbOn = False
+            except Exception:
+                pass
         report[kind + 's'] = placed
-
-    # Moving the imported occurrence onto its joint leaves a pending position;
-    # snapshot it so the timeline stays healthy.
-    try:
-        if design.snapshots.hasPendingSnapshot:
-            design.snapshots.add()
-    except Exception:
-        pass
     return report

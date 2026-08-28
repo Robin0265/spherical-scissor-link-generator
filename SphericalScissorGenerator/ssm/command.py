@@ -11,9 +11,9 @@ and the live preview both run off `parameters.solve_expressions`, which solves
 from expressions alone.
 """
 
-import json
 import math
 import threading
+import time
 import traceback
 
 import adsk.core
@@ -30,11 +30,6 @@ _handlers = []
 # them for the whole life of the add-in.
 _dialog_handlers = []
 
-# The open dialog's command, so the McMaster fetch event (which arrives on the
-# main thread but outside any command handler) can reach its inputs. Set by
-# CreatedHandler, cleared by DestroyHandler.
-_active_command = None
-
 # Dimensions fetched from McMaster for the current dialog, keyed 'bearing' /
 # 'bushing', plus the part numbers they came from. l_offset re-derives from
 # the bushing whenever bar_thickness changes, so the fetch has to outlive the
@@ -42,9 +37,12 @@ _active_command = None
 _fetched = {'bearing': None, 'bushing': None,
             'bearing_pn': '', 'bushing_pn': ''}
 
+# True while _run_fetch is pumping its progress dialog - the pump dispatches
+# UI events, so a second Fetch click during a lookup must be ignored.
+_fetch_running = False
+
 # Attribute group/names used to remember part numbers in the document.
 ATTR_GROUP = 'SSM'
-FETCH_EVENT_ID = 'ssmMcMasterFetchDone'
 
 
 def _bind(app, ui):
@@ -169,34 +167,23 @@ def _input_mm(inputs, input_id):
     return field.value * 10.0 if field else None
 
 
-def _fetch_worker(bearing_pn, bushing_pn):
-    """Runs on a worker thread: file/network work only, no API objects.
+def _lookup_worker(bearing_pn, bushing_pn, results):
+    """Runs on a worker thread: metadata lookups only, never the Fusion API.
 
     Each part resolves (or fails) on its own so a found bushing still
-    autofills while the bearing waits on a download. Results are marshalled
-    back to the main thread through the custom event - the Fusion API must
-    never be touched here.
+    autofills while the bearing is still missing. Results land in the shared
+    dict; the main thread is pumping a progress dialog meanwhile.
     """
-    payload = {'bearing_pn': bearing_pn, 'bushing_pn': bushing_pn}
-    problems = []
     for kind, part_number in (('bearing', bearing_pn), ('bushing', bushing_pn)):
         if not part_number:
             continue
         try:
-            dims, source = mcmaster.fetch_hardware(part_number, kind)
-            payload[kind] = dims
-            payload[kind + '_source'] = source
+            results[kind] = mcmaster.fetch_hardware(part_number, kind)
         except mcmaster.McMasterError as err:
-            problems.append(str(err))
+            results[kind + '_error'] = str(err)
         except Exception:
-            problems.append('%s %s failed:\n%s' % (kind, part_number,
-                                                   traceback.format_exc(limit=2)))
-    if problems:
-        payload['error'] = '\n'.join(problems)
-    try:
-        _app.fireCustomEvent(FETCH_EVENT_ID, json.dumps(payload))
-    except Exception:
-        pass  # dialog gone and event unregistered - nothing left to update
+            results[kind + '_error'] = '%s %s failed:\n%s' % (
+                kind, part_number, traceback.format_exc(limit=2))
 
 
 def _apply_fetched(inputs):
@@ -223,37 +210,69 @@ def _apply_fetched(inputs):
     return '\n'.join(lines)
 
 
-class FetchDoneHandler(adsk.core.CustomEventHandler):
-    """Applies a finished McMaster fetch to the dialog, on the main thread."""
+def _run_fetch(inputs):
+    """The Fetch button: metadata lookup with a visible progress dialog.
 
-    def notify(self, args):
+    The lookup itself runs on a worker thread (a slow connection must not
+    freeze Fusion); the main thread animates a progress dialog and pumps the
+    event loop until the worker finishes, then applies the dimensions - so
+    by the time the dialog closes, the parameters are already updated. CAD
+    is never touched here; Generate acquires and imports it.
+    """
+    global _fetch_running
+    if _fetch_running:
+        return
+    bearing_pn = (inputs.itemById('mcmBearing').value or '').strip().upper()
+    bushing_pn = (inputs.itemById('mcmBushing').value or '').strip().upper()
+    if not bearing_pn and not bushing_pn:
+        _set_status(inputs, 'Enter a thrust bearing and/or bushing part '
+                            'number first.', True)
+        return
+
+    results = {}
+    worker = threading.Thread(target=_lookup_worker,
+                              args=(bearing_pn, bushing_pn, results),
+                              daemon=True)
+    dialog = _ui.createProgressDialog()
+    dialog.isCancelButtonShown = False
+    _fetch_running = True
+    try:
+        dialog.show(CMD_NAME, 'Looking up %s…' % ' and '.join(
+            pn for pn in (bearing_pn, bushing_pn) if pn), 0, 100, 0)
+        worker.start()
+        value = 0
+        while worker.is_alive():
+            value = (value + 2) % 100
+            dialog.progressValue = value
+            adsk.doEvents()
+            time.sleep(0.04)
+    finally:
+        _fetch_running = False
         try:
-            if _active_command is None:
-                return
-            inputs = _active_command.commandInputs
-            payload = json.loads(args.additionalInfo)
-            fetched_any = False
-            for kind in ('bearing', 'bushing'):
-                if payload.get(kind):
-                    _fetched[kind] = payload[kind]
-                    _fetched[kind + '_pn'] = payload.get(kind + '_pn', '')
-                    fetched_any = True
-            lines = []
-            if fetched_any:
-                # Apply what arrived even when the other part failed - a
-                # found bushing should not wait for the bearing's download.
-                lines.append(_apply_fetched(inputs))
-            if payload.get('error'):
-                lines.append(payload['error'])
-            _set_status(inputs, '\n'.join(lines) or 'Nothing to fetch.',
-                        bool(payload.get('error')))
-        except mcmaster.McMasterError as err:
-            try:
-                _set_status(_active_command.commandInputs, str(err), True)
-            except Exception:
-                pass
+            dialog.hide()
         except Exception:
-            pass  # never take the dialog down from an event handler
+            pass
+
+    lines, errors = [], []
+    fetched_any = False
+    for kind, part_number in (('bearing', bearing_pn), ('bushing', bushing_pn)):
+        if kind in results:
+            dims, source = results[kind]
+            _fetched[kind] = dims
+            _fetched[kind + '_pn'] = part_number
+            fetched_any = True
+            lines.append('%s %s: metadata from %s.'
+                         % (kind.capitalize(), part_number, source))
+        error = results.get(kind + '_error')
+        if error:
+            errors.append(error)
+    if fetched_any:
+        try:
+            lines.append(_apply_fetched(inputs))
+        except mcmaster.McMasterError as err:
+            errors.append(str(err))
+    _set_status(inputs, '\n'.join(lines + errors) or 'Nothing to fetch.',
+                bool(errors))
 
 
 def _auto_resolve(inputs):
@@ -345,21 +364,6 @@ def _remember_part_numbers(design, gathered):
             pass
 
 
-def _start_fetch(inputs):
-    """Kick off the worker thread for the part numbers currently typed."""
-    bearing_pn = (inputs.itemById('mcmBearing').value or '').strip().upper()
-    bushing_pn = (inputs.itemById('mcmBushing').value or '').strip().upper()
-    if not bearing_pn and not bushing_pn:
-        _set_status(inputs, 'Enter a thrust bearing and/or bushing part '
-                            'number first.', True)
-        return
-    _set_status(inputs, 'Looking up %s…'
-                % ' and '.join(pn for pn in (bearing_pn, bushing_pn) if pn),
-                False)
-    threading.Thread(target=_fetch_worker, args=(bearing_pn, bushing_pn),
-                     daemon=True).start()
-
-
 class ValidateHandler(adsk.core.ValidateInputsEventHandler):
     def notify(self, args):
         try:
@@ -383,7 +387,7 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 button = inputs.itemById('mcmFetch')
                 if button.value:
                     button.value = False
-                    _start_fetch(inputs)
+                    _run_fetch(inputs)
                 return
             if changed in ('mcmBearing', 'mcmBushing'):
                 # Once the text no longer names the fetched part, that part
@@ -560,8 +564,6 @@ class DestroyHandler(adsk.core.CommandEventHandler):
         self._terminate = terminate_on_destroy
 
     def notify(self, args):
-        global _active_command
-        _active_command = None
         draft.clear()
         if self._terminate:
             adsk.terminate()
@@ -579,8 +581,6 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             edited = custom_feature.edit_target(_ui)
 
             cmd = args.command
-            global _active_command
-            _active_command = cmd
             # Fetched dimensions belong to one dialog session: a stale bushing
             # must not keep re-deriving l_offset in the next dialog.
             _fetched.update(bearing=None, bushing=None,
@@ -773,18 +773,6 @@ def register(app, ui, terminate_on_destroy=False):
     created = CreatedHandler(terminate_on_destroy)
     definition.commandCreated.add(created)
     _handlers.append(created)
-
-    # The McMaster fetch runs on a worker thread and reports back through this
-    # custom event; registration survives across dialogs, so it lives with the
-    # command definition rather than with any one dialog.
-    try:
-        app.unregisterCustomEvent(FETCH_EVENT_ID)
-    except Exception:
-        pass
-    fetch_event = app.registerCustomEvent(FETCH_EVENT_ID)
-    fetch_done = FetchDoneHandler()
-    fetch_event.add(fetch_done)
-    _handlers.extend([fetch_event, fetch_done])
     return definition
 
 
@@ -794,11 +782,6 @@ def unregister(ui):
         existing = ui.commandDefinitions.itemById(CMD_ID)
         if existing:
             existing.deleteMe()
-    except Exception:
-        pass
-    try:
-        if _app:
-            _app.unregisterCustomEvent(FETCH_EVENT_ID)
     except Exception:
         pass
     del _handlers[:]
