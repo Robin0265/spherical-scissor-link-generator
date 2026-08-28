@@ -270,7 +270,7 @@ def _auto_resolve(inputs):
             continue
         try:
             dims, _source = mcmaster.fetch_hardware(
-                part_number, kind, open_browser=False, local_only=True)
+                part_number, kind, local_only=True)
         except mcmaster.McMasterError:
             continue
         _fetched[kind] = dims
@@ -302,8 +302,7 @@ def _resolve_for_build(design, gathered):
         if _fetched[kind] is not None and _fetched[kind + '_pn'] == part_number:
             continue
         try:
-            dims, source = mcmaster.fetch_hardware(
-                part_number, kind, open_browser=False)
+            dims, source = mcmaster.fetch_hardware(part_number, kind)
             _fetched[kind] = dims
             _fetched[kind + '_pn'] = part_number
             notes.append('%s %s: dimensions resolved from %s at Generate.'
@@ -676,12 +675,10 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             fetch.text = 'Fetch'
             fetch.tooltip = (
                 'Fill bearing_OD, bearing_thickness and l_offset from the '
-                'parts\' dimensions: from the local cache, a STEP you '
-                'downloaded from mcmaster.com into Downloads (measured '
-                'directly from its geometry), or the Product Information API '
-                'if credentials are configured. With none of those, Fetch '
-                'opens the part pages to download from. The fields stay '
-                'editable.')
+                'parts\' dimensions - retrieved over HTTP from the Product '
+                'Information API when configured, else from the local cache '
+                'or a STEP already in Downloads. No browser is opened. The '
+                'fields stay editable, and Generate imports the parts.')
             hardware.isExpanded = bool(attr_default('mcm_bearing')
                                        or attr_default('mcm_bushing'))
 

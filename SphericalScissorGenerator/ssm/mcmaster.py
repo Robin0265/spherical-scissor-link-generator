@@ -30,7 +30,6 @@ import shutil
 import ssl
 import urllib.error
 import urllib.request
-import webbrowser
 
 API_BASE = 'https://api.mcmaster.com'
 TIMEOUT_S = 20
@@ -486,18 +485,17 @@ def extract_bushing(product):
 # ---------------------------------------------------------------------------
 # The lookup itself
 
-def fetch_hardware(part_number, kind, open_browser=True, local_only=False):
+def fetch_hardware(part_number, kind, local_only=False):
     """Dimensions for a part: cache, then API (if configured), then a STEP
     the user downloaded by hand.
 
-    Returns (dims, source) with source 'cache', 'api' or 'step'. When
-    nothing is available the part page is opened in the browser (once per
-    call, so the user can go straight to the STEP download) and a
-    McMasterError explains what to do.
+    Returns (dims, source) with source 'cache', 'api' or 'step'. Never opens
+    a browser. When nothing is available a McMasterError explains the two
+    honest options (configure the free API, or drop the STEP in Downloads).
 
-    local_only=True restricts to the cache and Downloads - no network, no
-    browser - so the dialog can auto-resolve on every keystroke without
-    blocking the UI thread.
+    local_only=True restricts to the cache and Downloads - no network - so
+    the dialog can auto-resolve on every keystroke without blocking the UI
+    thread.
     """
     part_number = part_number.strip().upper()
     kind = kind.lower()
@@ -533,22 +531,18 @@ def fetch_hardware(part_number, kind, open_browser=True, local_only=False):
         save_dims(part_number, dims)
         return dims, 'step'
 
-    if open_browser and not local_only:
-        try:
-            webbrowser.open(part_url(part_number))
-        except Exception:
-            pass
-        raise McMasterError(
-            '%s %s: the part page was opened in your browser. Click 3-D, '
-            'pick STEP, and download it (free, no login) - the tool then '
-            'picks it up from Downloads automatically on the next dialog '
-            'change or on Generate.' % (kind.capitalize(), part_number))
+    if local_only:
+        # Quiet path (per-keystroke auto-resolve): nothing local yet.
+        raise McMasterError('%s %s not available locally yet.'
+                            % (kind.capitalize(), part_number))
     raise McMasterError(
-        '%s %s: not cached and no STEP found in %s.\nDownload the part\'s '
-        '3-D STEP from %s (the Fetch button opens it), then Generate.'
-        % (kind.capitalize(), part_number,
-           ' or '.join(downloads_dirs()) or 'Downloads',
-           part_url(part_number)))
+        '%s %s could not be retrieved automatically. McMaster only allows '
+        'programmatic access through its free Product Information API - '
+        'configure it (see the README) for automatic metadata and STEP '
+        'download. Otherwise download the 3-D STEP for %s from %s into %s '
+        'and it will be picked up automatically.'
+        % (kind.capitalize(), part_number, part_number,
+           part_url(part_number), ' or '.join(downloads_dirs()) or 'Downloads'))
 
 
 # ---------------------------------------------------------------------------
