@@ -120,28 +120,55 @@ def cached_step(part_number):
     return path if os.path.isfile(path) else None
 
 
-def downloads_dir():
-    return os.path.join(os.path.expanduser('~'), 'Downloads')
+def downloads_dirs():
+    """Every folder a browser download can land in, most authoritative first.
+
+    Windows keeps the real Downloads location in the registry (it is often
+    redirected, e.g. to OneDrive, on managed machines), so ask there first
+    and fall back to the conventional spots.
+    """
+    folders = []
+    try:
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion\Explorer'
+                r'\User Shell Folders') as key:
+            value = winreg.QueryValueEx(
+                key, '{374DE290-123F-4565-9164-39C4925E467B}')[0]
+            folders.append(os.path.expandvars(value))
+    except Exception:
+        pass
+    folders.append(os.path.join(os.path.expanduser('~'), 'Downloads'))
+    onedrive = os.environ.get('OneDrive')
+    if onedrive:
+        folders.append(os.path.join(onedrive, 'Downloads'))
+    unique = []
+    for folder in folders:
+        if folder not in unique and os.path.isdir(folder):
+            unique.append(folder)
+    return unique
 
 
 def find_downloaded_step(part_number, folder=None):
-    """The newest '<PN>*.step' in Downloads, or None.
+    """The newest '<PN>*.step' in the Downloads folder(s), or None.
 
     McMaster names its downloads '<PN>_<FAMILY DESCRIPTION>.STEP', so a
     prefix match is enough and the tail doubles as a description.
     """
-    folder = folder or downloads_dir()
-    if not os.path.isdir(folder):
-        return None
     prefix = part_number.upper()
-    candidates = [name for name in os.listdir(folder)
-                  if name.upper().startswith(prefix)
-                  and name.upper().endswith(('.STEP', '.STP'))]
+    candidates = []
+    for place in ([folder] if folder else downloads_dirs()):
+        if not os.path.isdir(place):
+            continue
+        for name in os.listdir(place):
+            if name.upper().startswith(prefix) \
+                    and name.upper().endswith(('.STEP', '.STP')):
+                candidates.append(os.path.join(place, name))
     if not candidates:
         return None
-    candidates.sort(key=lambda name: os.path.getmtime(os.path.join(folder, name)),
-                    reverse=True)
-    return os.path.join(folder, candidates[0])
+    candidates.sort(key=os.path.getmtime, reverse=True)
+    return candidates[0]
 
 
 # ---------------------------------------------------------------------------
@@ -459,14 +486,18 @@ def extract_bushing(product):
 # ---------------------------------------------------------------------------
 # The lookup itself
 
-def fetch_hardware(part_number, kind, open_browser=True):
+def fetch_hardware(part_number, kind, open_browser=True, local_only=False):
     """Dimensions for a part: cache, then API (if configured), then a STEP
     the user downloaded by hand.
 
     Returns (dims, source) with source 'cache', 'api' or 'step'. When
     nothing is available the part page is opened in the browser (once per
     call, so the user can go straight to the STEP download) and a
-    McMasterError explains the two-press flow.
+    McMasterError explains what to do.
+
+    local_only=True restricts to the cache and Downloads - no network, no
+    browser - so the dialog can auto-resolve on every keystroke without
+    blocking the UI thread.
     """
     part_number = part_number.strip().upper()
     kind = kind.lower()
@@ -479,7 +510,7 @@ def fetch_hardware(part_number, kind, open_browser=True):
     if dims is not None:
         return dims, 'cache'
 
-    config = load_config()
+    config = None if local_only else load_config()
     if config is not None:
         product = _api_product(part_number)
         extract = extract_bearing if kind == 'bearing' else extract_bushing
@@ -502,16 +533,22 @@ def fetch_hardware(part_number, kind, open_browser=True):
         save_dims(part_number, dims)
         return dims, 'step'
 
-    if open_browser:
+    if open_browser and not local_only:
         try:
             webbrowser.open(part_url(part_number))
         except Exception:
             pass
+        raise McMasterError(
+            '%s %s: the part page was opened in your browser. Click 3-D, '
+            'pick STEP, and download it (free, no login) - the tool then '
+            'picks it up from Downloads automatically on the next dialog '
+            'change or on Generate.' % (kind.capitalize(), part_number))
     raise McMasterError(
-        '%s %s: not cached, no API credentials, and no STEP in %s.\n'
-        'The part page was opened in your browser - download its 3-D STEP '
-        '(free, no login), then press Fetch again to measure it.'
-        % (kind.capitalize(), part_number, downloads_dir()))
+        '%s %s: not cached and no STEP found in %s.\nDownload the part\'s '
+        '3-D STEP from %s (the Fetch button opens it), then Generate.'
+        % (kind.capitalize(), part_number,
+           ' or '.join(downloads_dirs()) or 'Downloads',
+           part_url(part_number)))
 
 
 # ---------------------------------------------------------------------------

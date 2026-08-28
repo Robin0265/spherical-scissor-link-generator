@@ -133,15 +133,19 @@ link cycle plus `n−1` spine crossings) — with placed counts, and the part
 numbers are remembered in the document, so an edit dialog offers them again.
 
 **No credentials are needed.** For a part it has never seen, Fetch opens
-`mcmaster.com/<part>/` in your browser; click the **3-D STEP** download there
-(free and anonymous — exactly how McMaster intends CAD to be retrieved), then
-press Fetch again. The tool finds the file in your Downloads, copies it into
-the cache, and **measures the dimensions from the STEP geometry itself**:
-bore and outside diameter from the cylindrical faces along the part's
-dominant axis, length/thickness from the extent along it. A needle bearing's
-rollers are cylinders too, but they lie crosswise and are filtered out; inch
-and millimetre exports are both understood from the file's unit declaration.
-Two presses the first time, zero thereafter.
+`mcmaster.com/<part>/` in your browser; click **3-D**, pick **STEP**, and
+download it (free and anonymous — exactly how McMaster intends CAD to be
+retrieved). That download is the only manual step, and it happens once per
+part ever: from then on the tool picks the file up **automatically** — on
+the next dialog interaction, when a dialog opens with remembered part
+numbers, and in any case at Generate, which resolves still-pending parts
+right before building. The file is found via the registry's Downloads
+location (OneDrive redirections included), copied into the cache, and the
+dimensions are **measured from the STEP geometry itself**: bore and outside
+diameter from the cylindrical faces along the part's dominant axis,
+length/thickness from the extent along it. A needle bearing's rollers are
+cylinders too, but they lie crosswise and are filtered out; inch and
+millimetre exports are both understood from the file's unit declaration.
 
 Why measure a downloaded file instead of just fetching the spec table?
 Because anonymous scraping only works for a real interactive browser like the

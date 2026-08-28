@@ -82,6 +82,10 @@ def _gather(inputs):
     clockwise = bool(direction and direction.selectedItem
                      and direction.selectedItem.name.startswith('Clockwise'))
 
+    def part_number(input_id):
+        field = inputs.itemById(input_id)
+        return (field.value or '').strip().upper() if field else ''
+
     return {
         'centre_ent': _selected(inputs, 'centrePoint'),
         'spine_plane_ent': _selected(inputs, 'spinePlane'),
@@ -92,6 +96,8 @@ def _gather(inputs):
         'purge': inputs.itemById('purge').value,
         'pack': inputs.itemById('pack').value,
         'solids': inputs.itemById('solids').value,
+        'bearing_pn': part_number('mcmBearing'),
+        'bushing_pn': part_number('mcmBushing'),
     }
 
 
@@ -250,6 +256,96 @@ class FetchDoneHandler(adsk.core.CustomEventHandler):
             pass  # never take the dialog down from an event handler
 
 
+def _auto_resolve(inputs):
+    """Pick up locally-available parts (cache, finished downloads) with no
+    button press. Quiet by design: a part that is not there yet just stays
+    pending. Returns True when new dimensions were applied."""
+    resolved = False
+    for kind, input_id in (('bearing', 'mcmBearing'), ('bushing', 'mcmBushing')):
+        field = inputs.itemById(input_id)
+        if field is None:
+            continue
+        part_number = (field.value or '').strip().upper()
+        if not part_number or _fetched[kind + '_pn'] == part_number:
+            continue
+        try:
+            dims, _source = mcmaster.fetch_hardware(
+                part_number, kind, open_browser=False, local_only=True)
+        except mcmaster.McMasterError:
+            continue
+        _fetched[kind] = dims
+        _fetched[kind + '_pn'] = part_number
+        resolved = True
+    if resolved:
+        try:
+            _set_status(inputs, _apply_fetched(inputs), False)
+        except mcmaster.McMasterError:
+            pass  # the conflict reaches the user through validation
+    return resolved
+
+
+def _resolve_for_build(design, gathered):
+    """Resolve the typed part numbers at Generate time and fold their
+    dimensions into the build's overrides.
+
+    Full resolution (cache, Downloads, API when configured), so pressing
+    Generate right after downloading the STEPs needs no Fetch in between.
+    Returns notes for the report; raises RuntimeError on a hard conflict,
+    before anything touches the document."""
+    notes = []
+    for kind in ('bearing', 'bushing'):
+        part_number = gathered.get(kind + '_pn') or ''
+        if not part_number:
+            _fetched[kind] = None
+            _fetched[kind + '_pn'] = ''
+            continue
+        if _fetched[kind] is not None and _fetched[kind + '_pn'] == part_number:
+            continue
+        try:
+            dims, source = mcmaster.fetch_hardware(
+                part_number, kind, open_browser=False)
+            _fetched[kind] = dims
+            _fetched[kind + '_pn'] = part_number
+            notes.append('%s %s: dimensions resolved from %s at Generate.'
+                         % (kind.capitalize(), part_number, source))
+        except mcmaster.McMasterError as err:
+            notes.append(str(err))
+    if _fetched['bearing'] is None and _fetched['bushing'] is None:
+        return notes
+    try:
+        solved = parameters.solve_expressions(design, gathered['overrides'])
+        expressions, _warnings = mcmaster.hardware_autofill(
+            _fetched['bearing'], _fetched['bushing'],
+            solved['bar_thickness'] * 10.0, solved['bar_width'] * 10.0)
+        gathered['overrides'].update(expressions)
+        solved = parameters.solve_expressions(design, gathered['overrides'])
+        sizes_mm = {name: solved[name] * 10.0
+                    for name in ('bar_width', 'bar_thickness', 'l_offset',
+                                 'bearing_OD', 'bearing_thickness')}
+        conflict = mcmaster.hardware_problem(
+            _fetched['bearing'], _fetched['bushing'], sizes_mm)
+    except mcmaster.McMasterError as err:
+        raise RuntimeError(str(err))
+    if conflict:
+        raise RuntimeError(conflict)
+    return notes
+
+
+def _remember_part_numbers(design, gathered):
+    """Persist the typed part numbers on the document, fetched or not, so
+    the next dialog offers them again."""
+    for name, part_number in (('mcm_bearing', gathered['bearing_pn']),
+                              ('mcm_bushing', gathered['bushing_pn'])):
+        try:
+            existing = design.attributes.itemByName(ATTR_GROUP, name)
+            if part_number:
+                design.attributes.add(ATTR_GROUP, name, part_number)
+            elif existing is not None:
+                existing.deleteMe()
+        except Exception:
+            pass
+
+
 def _start_fetch(inputs):
     """Kick off the worker thread for the part numbers currently typed."""
     bearing_pn = (inputs.itemById('mcmBearing').value or '').strip().upper()
@@ -291,19 +387,20 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                     _start_fetch(inputs)
                 return
             if changed in ('mcmBearing', 'mcmBushing'):
-                # Typing is not a geometry change, but once the text no
-                # longer names the fetched part, that part must stop gating
-                # validation (clearing the field is how manual dimensions
-                # come back).
+                # Once the text no longer names the fetched part, that part
+                # must stop gating validation (clearing the field is how
+                # manual dimensions come back); a typed part that is already
+                # cached or downloaded autofills with no button press.
                 kind = 'bearing' if changed == 'mcmBearing' else 'bushing'
                 typed = (inputs.itemById(changed).value or '').strip().upper()
                 if _fetched[kind] is not None and typed != _fetched[kind + '_pn']:
                     _fetched[kind] = None
                     _fetched[kind + '_pn'] = ''
-                    # fall through: a cleared part releases its validation
-                    # gate, and the status line should say so immediately
-                else:
-                    return
+            # Any dialog interaction quietly picks up parts whose download
+            # has finished since the last event - no Fetch press needed. On
+            # a pickup the status already reports what was applied.
+            if _auto_resolve(inputs):
+                return
             if changed == 'p_bar_thickness' and _fetched['bushing']:
                 # The boss must stay flush with the fetched bushing.
                 try:
@@ -376,16 +473,16 @@ def _log_timings(reporter):
     return False
 
 
-def _hardware_report(design, solved, report):
-    """The BOM for the fetched McMaster parts, and remember them on the doc.
+def _hardware_report(solved, report, gathered):
+    """The BOM for the McMaster parts, typed or fetched.
 
     Every joint mates one IN and one OUT boss: 2n+2 joints around the link
     cycle plus n-1 middle-link crossings on the spine, 3n+1 in total. Each
     takes one thrust bearing in the boss gap and one press-fit bushing per
     boss bore.
     """
-    bearing_pn = _fetched['bearing_pn']
-    bushing_pn = _fetched['bushing_pn']
+    bearing_pn = gathered.get('bearing_pn') or ''
+    bushing_pn = gathered.get('bushing_pn') or ''
     if not bearing_pn and not bushing_pn:
         return ''
     n = solved['n']
@@ -400,13 +497,6 @@ def _hardware_report(design, solved, report):
         lines.append('  %d x bushing %s (one per boss bore, %d placed)'
                      % (2 * joints, bushing_pn,
                         report.get('hardware_bushings', 0)))
-    for name, part_number in (('mcm_bearing', bearing_pn),
-                              ('mcm_bushing', bushing_pn)):
-        if part_number:
-            try:
-                design.attributes.add(ATTR_GROUP, name, part_number)
-            except Exception:
-                pass
     return '\n'.join(lines)
 
 
@@ -421,6 +511,14 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 
             gathered = _gather(inputs)
             draft.clear()
+            # Typed part numbers survive on the document whether or not
+            # their dimensions resolve - forgetting them was a bug.
+            _remember_part_numbers(design, gathered)
+            # Resolve any still-pending part now (cache, Downloads, API):
+            # Generate is the moment the user expects the parts to be
+            # fetched and imported. Conflicts abort before the document is
+            # touched.
+            hardware_notes = _resolve_for_build(design, gathered)
             # The reporter keeps Fusion painted and cancellable during the
             # build. The API is single-threaded, so this cannot run in the
             # background - yielding between features is the available lever.
@@ -435,9 +533,11 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 timed = _log_timings(reporter)
             solved = parameters.read_solved(design)
             message = audit.format_report(report, solved)
-            hardware_note = _hardware_report(design, solved, report)
+            hardware_note = _hardware_report(solved, report, gathered)
             if hardware_note:
                 message += '\n\n' + hardware_note
+            if hardware_notes:
+                message += '\n\n' + '\n'.join(hardware_notes)
             if timed:
                 message += ('\n\nStage timings were written to the Text '
                             'Commands palette (View > Show Text Commands).')
@@ -637,6 +737,10 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             else:
                 _set_status(inputs, 'Select a centre point, a spine plane, and '
                                     'a start plane.', False)
+
+            # Remembered part numbers whose data is already local (cache or
+            # a finished download) autofill as soon as the dialog opens.
+            _auto_resolve(inputs)
         except Exception:
             if _ui:
                 _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
