@@ -536,13 +536,11 @@ def fetch_hardware(part_number, kind, local_only=False):
         raise McMasterError('%s %s not available locally yet.'
                             % (kind.capitalize(), part_number))
     raise McMasterError(
-        '%s %s could not be retrieved automatically. McMaster only allows '
-        'programmatic access through its free Product Information API - '
-        'configure it (see the README) for automatic metadata and STEP '
-        'download. Otherwise download the 3-D STEP for %s from %s into %s '
-        'and it will be picked up automatically.'
-        % (kind.capitalize(), part_number, part_number,
-           part_url(part_number), ' or '.join(downloads_dirs()) or 'Downloads'))
+        '%s %s: download its 3-D STEP from %s into %s, then it is picked up '
+        'automatically (press Fetch or Generate). Automatic download instead '
+        'needs the free McMaster API - see the README.'
+        % (kind.capitalize(), part_number, part_url(part_number),
+           ' or '.join(downloads_dirs()) or 'Downloads'))
 
 
 # ---------------------------------------------------------------------------

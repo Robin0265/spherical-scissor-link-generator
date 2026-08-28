@@ -353,7 +353,7 @@ def _start_fetch(inputs):
         _set_status(inputs, 'Enter a thrust bearing and/or bushing part '
                             'number first.', True)
         return
-    _set_status(inputs, 'Fetching %s from McMaster-Carr…'
+    _set_status(inputs, 'Looking up %s…'
                 % ' and '.join(pn for pn in (bearing_pn, bushing_pn) if pn),
                 False)
     threading.Thread(target=_fetch_worker, args=(bearing_pn, bushing_pn),
