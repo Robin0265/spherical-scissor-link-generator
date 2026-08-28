@@ -132,22 +132,24 @@ one bearing and two bushings per joint, `3n+1` joints (`2n+2` around the
 link cycle plus `n−1` spine crossings) — with placed counts, and the part
 numbers are remembered in the document, so an edit dialog offers them again.
 
-**No credentials are needed, and no browser is ever opened.** For a part the
-tool has never seen, download its 3-D STEP once from `mcmaster.com/<part>/`
-(open **3-D → STEP → Download** yourself; free and anonymous — exactly how
-McMaster intends CAD to be retrieved). That single download per part is the
-only manual step. From then on the tool picks the file up **automatically** —
-as you type the part number, on any dialog interaction, when a dialog opens
-with remembered part numbers, and in any case at Generate, which resolves any
-still-pending parts right before building. The file is found via the
-registry's Downloads location (OneDrive redirections included), copied into
-the cache, and the dimensions are **measured from the STEP geometry itself**:
-bore and outside diameter from the cylindrical faces along the part's dominant
-axis, length/thickness from the extent along it. A needle bearing's rollers
-are cylinders too, but they lie crosswise and are filtered out; inch and
-millimetre exports are both understood from the file's unit declaration. The
-Fetch button applies whatever is already downloaded or cached on demand, but
-it is optional — the same pickup happens on its own.
+**No credentials are needed.** For a part the tool has never seen, download
+its 3-D STEP once: the **Open part pages** button opens the typed part numbers
+on mcmaster.com in your own browser (it skips any already available locally),
+where you click **3-D → STEP → Download** — free and anonymous, exactly how
+McMaster intends CAD to be retrieved, and the one place a human, not a script,
+is allowed. That single download per part is the only manual step. From then
+on the tool picks the file up **automatically** — as you type the part number,
+on any dialog interaction, when a dialog opens with remembered part numbers,
+and in any case at Generate, which resolves any still-pending parts right
+before building. The file is found via the registry's Downloads location
+(OneDrive redirections included), copied into the cache, and the dimensions
+are **measured from the STEP geometry itself**: bore and outside diameter from
+the cylindrical faces along the part's dominant axis, length/thickness from the
+extent along it. A needle bearing's rollers are cylinders too, but they lie
+crosswise and are filtered out; inch and millimetre exports are both understood
+from the file's unit declaration. The **Fetch** button applies whatever is
+already downloaded or cached on demand (with a progress dialog, never a
+browser), but it is optional — the same pickup happens on its own.
 
 Why measure a downloaded file instead of just fetching the spec table over
 HTTP? Because anonymous programmatic access to mcmaster.com is blocked:

@@ -15,6 +15,7 @@ import math
 import threading
 import time
 import traceback
+import webbrowser
 
 import adsk.core
 import adsk.fusion
@@ -210,6 +211,41 @@ def _apply_fetched(inputs):
     return '\n'.join(lines)
 
 
+def _open_part_pages(inputs):
+    """Open the typed part numbers on mcmaster.com in the user's browser.
+
+    Deliberately user-initiated (a button), and it opens the real default
+    browser where the user is the human McMaster serves freely - the module
+    itself never opens a browser. Parts already resolved locally are skipped,
+    so this only ever offers up what still needs downloading.
+    """
+    urls, skipped = [], []
+    for kind, input_id in (('bearing', 'mcmBearing'), ('bushing', 'mcmBushing')):
+        part_number = (inputs.itemById(input_id).value or '').strip().upper()
+        if not part_number:
+            continue
+        if mcmaster.cached_step(part_number) or mcmaster.cached_dims(part_number) \
+                or mcmaster.find_downloaded_step(part_number):
+            skipped.append(part_number)
+            continue
+        urls.append((part_number, mcmaster.part_url(part_number)))
+    if not urls:
+        if skipped:
+            _set_status(inputs, 'Already available locally: %s. Nothing to '
+                        'download.' % ', '.join(skipped), False)
+        else:
+            _set_status(inputs, 'Enter a part number first.', True)
+        return
+    for _pn, url in urls:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+    _set_status(inputs, 'Opened %s in your browser. Download each 3-D STEP '
+                'into Downloads, then press Fetch or Generate.'
+                % ', '.join(pn for pn, _u in urls), False)
+
+
 def _run_fetch(inputs):
     """The Fetch button: metadata lookup with a visible progress dialog.
 
@@ -388,6 +424,12 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 if button.value:
                     button.value = False
                     _run_fetch(inputs)
+                return
+            if changed == 'mcmOpen':
+                button = inputs.itemById('mcmOpen')
+                if button.value:
+                    button.value = False
+                    _open_part_pages(inputs)
                 return
             if changed in ('mcmBearing', 'mcmBushing'):
                 # Once the text no longer names the fetched part, that part
@@ -679,6 +721,14 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'Information API when configured, else from the local cache '
                 'or a STEP already in Downloads. No browser is opened. The '
                 'fields stay editable, and Generate imports the parts.')
+            open_pages = hardware.children.addBoolValueInput(
+                'mcmOpen', 'Open part pages to download STEP', False, '', False)
+            open_pages.text = 'Open part pages'
+            open_pages.tooltip = (
+                'Open the typed part numbers on mcmaster.com in your browser '
+                'so you can download each 3-D STEP (free, no login). Drop '
+                'them in Downloads and the tool picks them up automatically '
+                'at Fetch or Generate. Only needed once per new part.')
             hardware.isExpanded = bool(attr_default('mcm_bearing')
                                        or attr_default('mcm_bushing'))
 
