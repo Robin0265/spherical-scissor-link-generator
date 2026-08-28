@@ -1,28 +1,36 @@
 """McMaster-Carr part lookup for the hardware parameters.
 
-Talks to the official Product Information API (https://www.mcmaster.com/help/api):
-log in with a client certificate + username/password, PUT the part number to
-subscribe and receive its specification table, GET the 3-D STEP into the local
-cache. The anonymous website endpoints are NOT used: they validate per-request
+Three sources, tried in order per part number:
+
+1. The local cache (CACHE_DIRNAME) - dimensions measured or fetched before.
+2. The official Product Information API (https://www.mcmaster.com/help/api),
+   when credentials are configured - optional, see CONFIG_TEMPLATE.
+3. A STEP file the user downloaded from mcmaster.com by hand: Fetch opens the
+   part page in the browser, the user clicks the 3-D STEP download (free and
+   anonymous - it is how McMaster intends CAD to be retrieved), and the next
+   Fetch picks the file up from Downloads and MEASURES the dimensions from
+   its geometry: bore and outside diameter from the cylindrical faces along
+   the dominant axis, length/thickness from the extent along that axis. No
+   credentials, no scraping.
+
+The site's anonymous data endpoints are NOT used: they validate per-request
 tokens minted by the site's own JavaScript (X-MCM-T-ID and friends, 403
 without them), which is bot protection this tool does not try to defeat.
 
-API access is free for McMaster customers but must be requested once:
-email eprocurement@mcmaster.com, receive a client certificate, and describe
-it in a config file (see CONFIG_TEMPLATE below and the README).
-
 This module never imports adsk, so everything in it can be exercised from a
 plain interpreter; the dialog wiring (worker thread, custom event) lives in
-command.py. Network results are cached under CACHE_DIRNAME so re-runs and the
-solid stage never depend on the network being up.
+command.py. Everything retrieved lands in the cache, so re-runs and the solid
+stage never depend on the network being up.
 """
 
 import json
 import os
 import re
+import shutil
 import ssl
 import urllib.error
 import urllib.request
+import webbrowser
 
 API_BASE = 'https://api.mcmaster.com'
 TIMEOUT_S = 20
@@ -41,6 +49,10 @@ class McMasterError(RuntimeError):
     """A fetch problem with a message fit for the dialog's status line."""
 
 
+def part_url(part_number):
+    return 'https://www.mcmaster.com/%s/' % part_number
+
+
 # ---------------------------------------------------------------------------
 # Config + cache locations
 
@@ -50,7 +62,7 @@ def _repo_root():
 
 
 def config_paths():
-    """Where credentials are looked for, in order."""
+    """Where API credentials are looked for, in order."""
     return [
         os.path.join(_repo_root(), CONFIG_BASENAME),
         os.path.join(os.path.expanduser('~'), CONFIG_BASENAME),
@@ -58,7 +70,7 @@ def config_paths():
 
 
 def load_config():
-    """The first readable config, or None if the API is not set up."""
+    """The first readable config, or None: the API is optional."""
     for path in config_paths():
         if os.path.isfile(path):
             try:
@@ -84,9 +96,9 @@ def cache_dir():
     return path
 
 
-def cached_product(part_number):
-    """The cached spec JSON for a part, or None."""
-    path = os.path.join(cache_dir(), part_number.upper() + '.json')
+def cached_dims(part_number):
+    """The cached dimensions for a part, or None."""
+    path = os.path.join(cache_dir(), part_number.upper() + '.dims.json')
     if os.path.isfile(path):
         try:
             with open(path, 'r', encoding='utf-8') as fh:
@@ -96,14 +108,144 @@ def cached_product(part_number):
     return None
 
 
+def save_dims(part_number, dims):
+    path = os.path.join(cache_dir(), part_number.upper() + '.dims.json')
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump(dims, fh, indent=1)
+
+
 def cached_step(part_number):
     """Path of the cached STEP file for a part, or None."""
     path = os.path.join(cache_dir(), part_number.upper() + '.step')
     return path if os.path.isfile(path) else None
 
 
+def downloads_dir():
+    return os.path.join(os.path.expanduser('~'), 'Downloads')
+
+
+def find_downloaded_step(part_number, folder=None):
+    """The newest '<PN>*.step' in Downloads, or None.
+
+    McMaster names its downloads '<PN>_<FAMILY DESCRIPTION>.STEP', so a
+    prefix match is enough and the tail doubles as a description.
+    """
+    folder = folder or downloads_dir()
+    if not os.path.isdir(folder):
+        return None
+    prefix = part_number.upper()
+    candidates = [name for name in os.listdir(folder)
+                  if name.upper().startswith(prefix)
+                  and name.upper().endswith(('.STEP', '.STP'))]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda name: os.path.getmtime(os.path.join(folder, name)),
+                    reverse=True)
+    return os.path.join(folder, candidates[0])
+
+
 # ---------------------------------------------------------------------------
-# API session
+# Measuring a STEP file
+#
+# McMaster's bearings and bushings are solids of revolution (plus rollers in
+# a bearing's cage): every dimension the autofill needs is a cylinder radius
+# or an extent along the part's axis, and STEP is a readable text format, so
+# no CAD kernel is needed. The dominant axis is the largest cylinder's; only
+# cylinders aligned with it count (a needle bearing's rollers are cylinders
+# too, but they lie crosswise and must not be mistaken for a bore).
+
+# STEP writes floats as '0.', '12.7' or '1.E-3', so the mantissa must accept
+# a bare trailing dot.
+_NUM = r'[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[Ee][-+]?[0-9]+)?'
+
+
+def _step_unit_scale(text):
+    """Millimetres per model unit, from the file's unit declaration."""
+    if re.search(r"CONVERSION_BASED_UNIT\s*\(\s*'INCH", text, re.IGNORECASE):
+        return 25.4
+    if re.search(r'SI_UNIT\s*\(\s*\.MILLI\.\s*,\s*\.METRE\.\s*\)', text):
+        return 1.0
+    if re.search(r'SI_UNIT\s*\(\s*\$?\s*,\s*\.METRE\.\s*\)', text):
+        return 1000.0
+    return 1.0  # McMaster exports declare units; a bare file is assumed mm
+
+
+def dims_from_step(path, kind):
+    """Measure {od_mm, id_mm, thickness_mm|length_mm} from a STEP file.
+
+    kind is 'bearing' (axial extent reported as thickness) or 'bushing'
+    (reported as length). Raises McMasterError when the file has no
+    cylindrical faces to measure - the wrong kind of part.
+    """
+    with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+        text = fh.read()
+    scale = _step_unit_scale(text)
+
+    directions = {}
+    for ent_id, coords in re.findall(
+            r"#(\d+)\s*=\s*DIRECTION\s*\(\s*'[^']*'\s*,\s*\(([^)]*)\)", text):
+        parts = [float(v) for v in re.findall(_NUM, coords)]
+        if len(parts) == 3:
+            directions[ent_id] = parts
+
+    # AXIS2_PLACEMENT_3D('', #origin, #axis, #refdir) - the axis is ref 2.
+    placement_axis = {}
+    for ent_id, refs in re.findall(
+            r"#(\d+)\s*=\s*AXIS2_PLACEMENT_3D\s*\(\s*'[^']*'\s*,([^;]*)\)", text):
+        ref_ids = re.findall(r'#(\d+)', refs)
+        if len(ref_ids) >= 2:
+            placement_axis[ent_id] = directions.get(ref_ids[1])
+
+    cylinders = []  # (radius, axis vector or None)
+    for placement_id, radius in re.findall(
+            r"CYLINDRICAL_SURFACE\s*\(\s*'[^']*'\s*,\s*#(\d+)\s*,\s*(%s)" % _NUM,
+            text):
+        cylinders.append((float(radius), placement_axis.get(placement_id)))
+    if not cylinders:
+        raise McMasterError(
+            '%s has no cylindrical faces to measure.' % os.path.basename(path))
+
+    axis = max(cylinders, key=lambda c: c[0])[1] or [0.0, 0.0, 1.0]
+    norm = sum(c * c for c in axis) ** 0.5 or 1.0
+    axis = [c / norm for c in axis]
+
+    def aligned(vector):
+        if vector is None:
+            return False
+        length = sum(c * c for c in vector) ** 0.5 or 1.0
+        dot = sum(a * v for a, v in zip(axis, vector)) / length
+        return abs(dot) > 0.99
+
+    radii = sorted(radius for radius, vector in cylinders if aligned(vector))
+    outer = radii[-1]
+    # A distinct smallest aligned radius is the bore; chamfers make cones,
+    # not cylinders, so they cannot sneak in here.
+    inner = radii[0] if radii[0] < outer * 0.999 else None
+
+    spans = []
+    for coords in re.findall(
+            r"CARTESIAN_POINT\s*\(\s*'[^']*'\s*,\s*\(([^)]*)\)", text):
+        parts = [float(v) for v in re.findall(_NUM, coords)]
+        if len(parts) == 3:
+            spans.append(sum(a * v for a, v in zip(axis, parts)))
+    if not spans:
+        raise McMasterError(
+            '%s has no coordinate data to measure.' % os.path.basename(path))
+    extent = (max(spans) - min(spans)) * scale
+
+    name = os.path.splitext(os.path.basename(path))[0]
+    description = name.split('_', 1)[1].strip().title() if '_' in name else ''
+    dims = {
+        'od_mm': 2.0 * outer * scale,
+        'id_mm': 2.0 * inner * scale if inner is not None else None,
+        'description': description,
+    }
+    dims['thickness_mm' if kind == 'bearing' else 'length_mm'] = extent
+    return dims
+
+
+# ---------------------------------------------------------------------------
+# Optional API session
 
 class Session:
     """One logged-in API session. Reuse it: tokens live for 24 h."""
@@ -189,46 +331,27 @@ def _readable_http_error(err):
 _session = None
 
 
-def fetch_product(part_number, refresh=False):
-    """Product info for a part number, from cache or the API.
-
-    Returns (product_json, source) where source is 'cache' or 'api'. Raises
-    McMasterError with a dialog-ready message when neither works.
-    """
+def _api_session():
     global _session
-    part_number = part_number.strip().upper()
-    if not part_number:
-        raise McMasterError('Enter a part number first.')
-    if not refresh:
-        cached = cached_product(part_number)
-        if cached is not None:
-            return cached, 'cache'
-
-    config = load_config()
-    if config is None:
-        raise McMasterError(
-            'Part %s is not cached and the McMaster API is not configured.\n'
-            'Create %s (see the README) or enter the dimensions by hand.'
-            % (part_number, config_paths()[0]))
     if _session is None:
-        _session = Session(config)
-    product = _session.product(part_number)
-    if not isinstance(product, dict) or 'PartNumber' not in product:
-        raise McMasterError('Unexpected reply for part %s.' % part_number)
+        _session = Session(load_config())
+    return _session
 
+
+def _api_product(part_number):
+    """Product info JSON via the API, cached beside the dims."""
+    product = _api_session().product(part_number)
+    if not isinstance(product, dict) or 'PartNumber' not in product:
+        raise McMasterError('Unexpected API reply for part %s.' % part_number)
     path = os.path.join(cache_dir(), part_number + '.json')
     with open(path, 'w', encoding='utf-8') as fh:
         json.dump(product, fh, indent=1)
-    return product, 'api'
+    return product
 
 
-def fetch_step(part_number, product):
-    """Download the part's 3-D STEP into the cache. Returns the path.
-
-    Failures are the caller's to soften: specs without a STEP are still
-    useful, so this must not take the autofill down with it.
-    """
-    existing = cached_step(part_number.upper())
+def _api_step(part_number, product):
+    """Download the part's 3-D STEP into the cache. Returns the path."""
+    existing = cached_step(part_number)
     if existing:
         return existing
     link = None
@@ -238,21 +361,15 @@ def fetch_step(part_number, product):
             break
     if not link:
         raise McMasterError('Part %s has no 3-D STEP file.' % part_number)
-    global _session
-    if _session is None:
-        config = load_config()
-        if config is None:
-            raise McMasterError('The McMaster API is not configured.')
-        _session = Session(config)
-    payload = _session.download(link)
-    path = os.path.join(cache_dir(), part_number.upper() + '.step')
+    payload = _api_session().download(link)
+    path = os.path.join(cache_dir(), part_number + '.step')
     with open(path, 'wb') as fh:
         fh.write(payload)
     return path
 
 
 # ---------------------------------------------------------------------------
-# Spec parsing
+# Spec parsing (API responses)
 
 _FRACTION = re.compile(r'^(?:(\d+)[\s-])?(\d+)/(\d+)$')
 _DECIMAL = re.compile(r'^\d+(?:\.\d+)?$')
@@ -337,6 +454,64 @@ def extract_bushing(product):
             'Part %s has no OD/length attributes - is it a sleeve bushing?'
             % product.get('PartNumber'))
     return dims
+
+
+# ---------------------------------------------------------------------------
+# The lookup itself
+
+def fetch_hardware(part_number, kind, open_browser=True):
+    """Dimensions for a part: cache, then API (if configured), then a STEP
+    the user downloaded by hand.
+
+    Returns (dims, source) with source 'cache', 'api' or 'step'. When
+    nothing is available the part page is opened in the browser (once per
+    call, so the user can go straight to the STEP download) and a
+    McMasterError explains the two-press flow.
+    """
+    part_number = part_number.strip().upper()
+    kind = kind.lower()
+    if not part_number:
+        raise McMasterError('Enter a part number first.')
+    if kind not in ('bearing', 'bushing'):
+        raise ValueError('kind must be bearing or bushing')
+
+    dims = cached_dims(part_number)
+    if dims is not None:
+        return dims, 'cache'
+
+    config = load_config()
+    if config is not None:
+        product = _api_product(part_number)
+        extract = extract_bearing if kind == 'bearing' else extract_bushing
+        dims = extract(product)
+        save_dims(part_number, dims)
+        try:
+            _api_step(part_number, product)
+        except Exception:
+            pass  # specs without CAD are still worth having
+        return dims, 'api'
+
+    step = cached_step(part_number)
+    if step is None:
+        downloaded = find_downloaded_step(part_number)
+        if downloaded is not None:
+            step = os.path.join(cache_dir(), part_number + '.step')
+            shutil.copyfile(downloaded, step)
+    if step is not None:
+        dims = dims_from_step(step, kind)
+        save_dims(part_number, dims)
+        return dims, 'step'
+
+    if open_browser:
+        try:
+            webbrowser.open(part_url(part_number))
+        except Exception:
+            pass
+    raise McMasterError(
+        '%s %s: not cached, no API credentials, and no STEP in %s.\n'
+        'The part page was opened in your browser - download its 3-D STEP '
+        '(free, no login), then press Fetch again to measure it.'
+        % (kind.capitalize(), part_number, downloads_dir()))
 
 
 # ---------------------------------------------------------------------------

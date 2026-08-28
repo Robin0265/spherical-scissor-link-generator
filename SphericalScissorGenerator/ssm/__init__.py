@@ -22,7 +22,7 @@ COMPONENT_NAME = 'Spherical Scissor'
 
 # Bumped on every behavioural change. Logged with the stage timings so a
 # stale module (the add-in only reloads ssm at Stop/Run) is always visible.
-VERSION = '2026.08.27.1-mcmaster-autofill'
+VERSION = '2026.08.27.2-step-measure'
 
 __all__ = ['PREFIX', 'COMPONENT_NAME', 'vectors', 'parameters', 'frame',
            'sketching', 'builder', 'solids', 'draft', 'progress', 'audit',

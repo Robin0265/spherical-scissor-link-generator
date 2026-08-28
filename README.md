@@ -117,11 +117,31 @@ joint, `3n+1` joints (`2n+2` around the link cycle plus `n−1` spine
 crossings) — and remembers the part numbers in the document, so an edit
 dialog offers them again.
 
-The lookup uses the official **McMaster-Carr Product Information API**
-(https://www.mcmaster.com/help/api). It is free but gated: email
-`eprocurement@mcmaster.com` once to register, and McMaster sends a client
-certificate and password. Describe them in `mcmaster_credentials.json` in the
-repo root (or your home folder) — gitignored, never commit it:
+**No credentials are needed.** For a part it has never seen, Fetch opens
+`mcmaster.com/<part>/` in your browser; click the **3-D STEP** download there
+(free and anonymous — exactly how McMaster intends CAD to be retrieved), then
+press Fetch again. The tool finds the file in your Downloads, copies it into
+the cache, and **measures the dimensions from the STEP geometry itself**:
+bore and outside diameter from the cylindrical faces along the part's
+dominant axis, length/thickness from the extent along it. A needle bearing's
+rollers are cylinders too, but they lie crosswise and are filtered out; inch
+and millimetre exports are both understood from the file's unit declaration.
+Two presses the first time, zero thereafter.
+
+Why measure a downloaded file instead of just fetching the spec table?
+Because anonymous scraping only works for a real interactive browser like the
+built-in *Insert McMaster-Carr Component* palette: the site's data endpoints
+validate per-request tokens minted by its own JavaScript (`X-MCM-T-ID` and
+friends) and answer 403 without them. That is deliberate bot protection, and
+this tool does not try to defeat it. The STEP download carries the same
+dimensions and is handed out freely.
+
+Optionally, the official **Product Information API**
+(https://www.mcmaster.com/help/api) removes the manual click entirely: email
+`eprocurement@mcmaster.com` once to register, McMaster sends a client
+certificate and password, and with `mcmaster_credentials.json` in the repo
+root (or your home folder — gitignored, never commit it) Fetch resolves specs
+and STEP in one press:
 
 ```json
 {
@@ -135,18 +155,10 @@ repo root (or your home folder) — gitignored, never commit it:
 (If the certificate arrives as a `.pfx`, convert it once:
 `openssl pkcs12 -in cert.pfx -out cert.pem -nodes`.)
 
-Why not scrape the site anonymously, like the built-in *Insert McMaster-Carr
-Component* browser does? Because that path only works for a real interactive
-browser: the site's data endpoints validate per-request tokens minted by its
-own JavaScript (`X-MCM-T-ID` and friends) and answer 403 without them. That is
-deliberate bot protection, and this tool does not try to defeat it — the
-sanctioned API is the automation path McMaster actually offers.
-
-Every fetched spec sheet and STEP file lands in `.mcmaster-cache/`
-(gitignored), keyed by part number, so re-fetching a cached part needs no
-network and no credentials — one person with API access can warm the cache for
-a whole lab. Without credentials and without a cache hit, the status line says
-so and the dimension fields simply stay manual.
+Everything retrieved — measured dimensions, spec sheets, STEP files — lands
+in `.mcmaster-cache/` (gitignored), keyed by part number, so a cached part
+needs no network, no browser and no credentials, and the cache folder can be
+copied between machines to share parts across a lab.
 
 The fetch itself runs on a worker thread (the Fusion API is single-threaded,
 so the reply is marshalled back through a custom event) — the dialog never

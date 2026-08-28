@@ -149,39 +149,33 @@ def _input_mm(inputs, input_id):
 
 
 def _fetch_worker(bearing_pn, bushing_pn):
-    """Runs on a worker thread: network only, no API objects.
+    """Runs on a worker thread: file/network work only, no API objects.
 
-    Results (or a readable failure) are marshalled back to the main thread
-    through the custom event - the Fusion API must never be touched here.
+    Each part resolves (or fails) on its own so a found bushing still
+    autofills while the bearing waits on a download. Results are marshalled
+    back to the main thread through the custom event - the Fusion API must
+    never be touched here.
     """
     payload = {'bearing_pn': bearing_pn, 'bushing_pn': bushing_pn}
-    try:
-        if bearing_pn:
-            product, source = mcmaster.fetch_product(bearing_pn)
-            payload['bearing'] = mcmaster.extract_bearing(product)
-            payload['bearing_source'] = source
-            payload['bearing_step'] = _try_step(bearing_pn, product)
-        if bushing_pn:
-            product, source = mcmaster.fetch_product(bushing_pn)
-            payload['bushing'] = mcmaster.extract_bushing(product)
-            payload['bushing_source'] = source
-            payload['bushing_step'] = _try_step(bushing_pn, product)
-    except mcmaster.McMasterError as err:
-        payload['error'] = str(err)
-    except Exception:
-        payload['error'] = 'Fetch failed:\n' + traceback.format_exc(limit=2)
+    problems = []
+    for kind, part_number in (('bearing', bearing_pn), ('bushing', bushing_pn)):
+        if not part_number:
+            continue
+        try:
+            dims, source = mcmaster.fetch_hardware(part_number, kind)
+            payload[kind] = dims
+            payload[kind + '_source'] = source
+        except mcmaster.McMasterError as err:
+            problems.append(str(err))
+        except Exception:
+            problems.append('%s %s failed:\n%s' % (kind, part_number,
+                                                   traceback.format_exc(limit=2)))
+    if problems:
+        payload['error'] = '\n'.join(problems)
     try:
         _app.fireCustomEvent(FETCH_EVENT_ID, json.dumps(payload))
     except Exception:
         pass  # dialog gone and event unregistered - nothing left to update
-
-
-def _try_step(part_number, product):
-    """Warm the STEP cache; specs are still useful when the CAD is not."""
-    try:
-        return bool(mcmaster.fetch_step(part_number, product))
-    except Exception:
-        return False
 
 
 def _apply_fetched(inputs):
@@ -217,15 +211,21 @@ class FetchDoneHandler(adsk.core.CustomEventHandler):
                 return
             inputs = _active_command.commandInputs
             payload = json.loads(args.additionalInfo)
-            if payload.get('error'):
-                _set_status(inputs, payload['error'], True)
-                return
+            fetched_any = False
             for kind in ('bearing', 'bushing'):
                 if payload.get(kind):
                     _fetched[kind] = payload[kind]
                     _fetched[kind + '_pn'] = payload.get(kind + '_pn', '')
-            message = _apply_fetched(inputs)
-            _set_status(inputs, message, False)
+                    fetched_any = True
+            lines = []
+            if fetched_any:
+                # Apply what arrived even when the other part failed - a
+                # found bushing should not wait for the bearing's download.
+                lines.append(_apply_fetched(inputs))
+            if payload.get('error'):
+                lines.append(payload['error'])
+            _set_status(inputs, '\n'.join(lines) or 'Nothing to fetch.',
+                        bool(payload.get('error')))
         except mcmaster.McMasterError as err:
             try:
                 _set_status(_active_command.commandInputs, str(err), True)
@@ -545,9 +545,13 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'mcmFetch', 'Fetch specs and autofill', False, '', False)
             fetch.text = 'Fetch'
             fetch.tooltip = (
-                'Look the parts up (McMaster Product Information API, or the '
-                'local cache) and fill bearing_OD, bearing_thickness and '
-                'l_offset from their dimensions. The fields stay editable.')
+                'Fill bearing_OD, bearing_thickness and l_offset from the '
+                'parts\' dimensions: from the local cache, a STEP you '
+                'downloaded from mcmaster.com into Downloads (measured '
+                'directly from its geometry), or the Product Information API '
+                'if credentials are configured. With none of those, Fetch '
+                'opens the part pages to download from. The fields stay '
+                'editable.')
             hardware.isExpanded = bool(attr_default('mcm_bearing')
                                        or attr_default('mcm_bushing'))
 
