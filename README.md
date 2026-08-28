@@ -109,13 +109,28 @@ from their catalogue dimensions:
 
 The fields stay editable — autofill sets values, it does not lock them — and
 editing `bar_thickness` after a fetch re-derives `l_offset` so the boss keeps
-matching the bushing. Impossible combinations are rejected with the reason
-(bushing shorter than the bar), and suspect ones get a warning in the status
-line (bearing OD overhanging the boss, bearing bore smaller than the bushing
-bore). Generate then reports a hardware BOM — one bearing and two bushings per
-joint, `3n+1` joints (`2n+2` around the link cycle plus `n−1` spine
-crossings) — and remembers the part numbers in the document, so an edit
-dialog offers them again.
+matching the bushing. While a fetched part is active it is **authoritative**:
+any conflict between it and the geometry fields greys out Generate/Update
+exactly like invalid geometry does — a thrust bearing wider than `bar_width`,
+a bearing bore the bushing's pin cannot pass, or a hand-edited parameter that
+no longer matches the part. The status line names the conflict and the way
+out (change the geometry, re-Fetch, or clear the part number to return to
+manual dimensions). Independent of any fetch, `bearing_OD >= bar_width` is
+always rejected — that bore would swallow the boss.
+
+Generate then **imports the parts and places them at every joint**: each
+cached STEP is imported once and repeated as occurrences — the thrust
+bearing centred on the sphere at radius `R` in the boss gap, and two
+bushings per joint pressed into the IN and OUT bores at
+`R ± (bearing_thickness/2 + (bar_thickness + 2·l_offset)/2)`. The part's own
+axis and midpoint are measured from its cylindrical faces after import, so
+McMaster's modelling conventions never matter. Placement is static: it is
+computed from the closed-form solution at generation time, so after
+parameter edits, re-run the generator to reposition the hardware (the same
+answer as for the constraint-branch hazard). The report includes the BOM —
+one bearing and two bushings per joint, `3n+1` joints (`2n+2` around the
+link cycle plus `n−1` spine crossings) — with placed counts, and the part
+numbers are remembered in the document, so an edit dialog offers them again.
 
 **No credentials are needed.** For a part it has never seen, Fetch opens
 `mcmaster.com/<part>/` in your browser; click the **3-D STEP** download there
@@ -180,6 +195,7 @@ SphericalScissorGenerator/
     ├── sketching.py    nudged arcs, spokes, chords, dimensions
     ├── builder.py      the link chain
     ├── mcmaster.py     McMaster-Carr part lookup for the hardware parameters
+    ├── hardware.py     imported McMaster parts placed at the joints
     └── audit.py        independent re-measurement of what was built
 ```
 

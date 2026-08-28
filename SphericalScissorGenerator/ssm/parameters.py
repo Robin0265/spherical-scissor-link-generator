@@ -89,6 +89,11 @@ def read_solved(design):
         'lam': value('lambda'),
         'span_target': value('span_target'),
         'n': int(round(value('n'))),
+        'bar_thickness': value('bar_thickness'),
+        'bar_width': value('bar_width'),
+        'l_offset': value('l_offset'),
+        'bearing_OD': value('bearing_OD'),
+        'bearing_thickness': value('bearing_thickness'),
     }
 
 
@@ -119,6 +124,16 @@ def solve_expressions(design, overrides=None):
         raise RuntimeError('span_target must be positive.')
     if raw['span_max'] <= 0:
         raise RuntimeError('span_max must be positive.')
+    for name in ('bar_thickness', 'bar_width', 'bearing_OD', 'bearing_thickness'):
+        if raw[name] <= 0:
+            raise RuntimeError('%s must be positive.' % name)
+    if raw['l_offset'] < 0:
+        raise RuntimeError('l_offset cannot be negative.')
+    if raw['bearing_OD'] >= raw['bar_width']:
+        raise RuntimeError(
+            'bearing_OD (the boss bore, %.3g mm) must stay below bar_width '
+            '(the boss diameter, %.3g mm) - this bore would swallow the boss.'
+            % (raw['bearing_OD'] * 10, raw['bar_width'] * 10))
 
     alpha_arg = math.cos(raw['beta']) * math.cos(raw['span_max'] / (2 * n))
     if abs(alpha_arg) > 1:
@@ -152,6 +167,13 @@ def solve_expressions(design, overrides=None):
         'lam': math.acos(lam_arg),
         'span_target': raw['span_target'],
         'n': n,
+        # Solid-stage sizes (cm), so hardware cross-checks can run off the
+        # same solve the dialog already does per keystroke.
+        'bar_thickness': raw['bar_thickness'],
+        'bar_width': raw['bar_width'],
+        'l_offset': raw['l_offset'],
+        'bearing_OD': raw['bearing_OD'],
+        'bearing_thickness': raw['bearing_thickness'],
     }
 
 
@@ -171,3 +193,9 @@ def validate(solved):
     for key in ('alpha', 'gamma', 'lam'):
         if solved[key] != solved[key]:  # NaN
             raise RuntimeError('Parameter "%s" did not evaluate to a real angle.' % key)
+    if 'bearing_OD' in solved and 'bar_width' in solved \
+            and solved['bearing_OD'] >= solved['bar_width']:
+        raise RuntimeError(
+            'bearing_OD (the boss bore, %.3g mm) must stay below bar_width '
+            '(the boss diameter, %.3g mm) - this bore would swallow the boss.'
+            % (solved['bearing_OD'] * 10, solved['bar_width'] * 10))

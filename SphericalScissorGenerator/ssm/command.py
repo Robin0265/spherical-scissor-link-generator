@@ -108,12 +108,23 @@ def _problem(design, args):
     if args['start_plane_ent'] is None:
         return 'Select the start plane.'
     try:
-        parameters.solve_expressions(design, args['overrides'])
+        solved = parameters.solve_expressions(design, args['overrides'])
         from . import frame as frame_mod
         from . import vectors as vec
         frame_mod.resolve(vec.point_of(args['centre_ent']),
                           args['spine_plane_ent'], args['start_plane_ent'],
                           args['clockwise'], args['flip_start'])
+        # Fetched McMaster parts are authoritative: a conflict between them
+        # and the geometry fields disables Generate/Update, exactly like any
+        # other invalid input. solve_expressions returns cm.
+        if _fetched['bearing'] or _fetched['bushing']:
+            sizes_mm = {name: solved[name] * 10.0
+                        for name in ('bar_width', 'bar_thickness', 'l_offset',
+                                     'bearing_OD', 'bearing_thickness')}
+            conflict = mcmaster.hardware_problem(
+                _fetched['bearing'], _fetched['bushing'], sizes_mm)
+            if conflict:
+                return conflict
     except RuntimeError as err:
         return str(err)
     except Exception as err:  # malformed selection, etc.
@@ -135,11 +146,15 @@ def _build(design, args, with_solids=None, reporter=None):
     so the document is only touched once, on Generate/Update."""
     if with_solids is None:
         with_solids = args['solids']
+    hardware = None
+    if _fetched['bearing_pn'] or _fetched['bushing_pn']:
+        hardware = {'bearing_pn': _fetched['bearing_pn'],
+                    'bushing_pn': _fetched['bushing_pn']}
     return builder.build(
         design, args['centre_ent'], args['spine_plane_ent'], args['start_plane_ent'],
         overrides=args['overrides'], clockwise=args['clockwise'],
         flip_start=args['flip_start'], purge=args['purge'], pack=args['pack'],
-        with_solids=with_solids, reporter=reporter)
+        with_solids=with_solids, reporter=reporter, hardware=hardware)
 
 
 def _input_mm(inputs, input_id):
@@ -276,7 +291,19 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                     _start_fetch(inputs)
                 return
             if changed in ('mcmBearing', 'mcmBushing'):
-                return  # typing a part number is not a geometry change
+                # Typing is not a geometry change, but once the text no
+                # longer names the fetched part, that part must stop gating
+                # validation (clearing the field is how manual dimensions
+                # come back).
+                kind = 'bearing' if changed == 'mcmBearing' else 'bushing'
+                typed = (inputs.itemById(changed).value or '').strip().upper()
+                if _fetched[kind] is not None and typed != _fetched[kind + '_pn']:
+                    _fetched[kind] = None
+                    _fetched[kind + '_pn'] = ''
+                    # fall through: a cleared part releases its validation
+                    # gate, and the status line should say so immediately
+                else:
+                    return
             if changed == 'p_bar_thickness' and _fetched['bushing']:
                 # The boss must stay flush with the fetched bushing.
                 try:
@@ -349,7 +376,7 @@ def _log_timings(reporter):
     return False
 
 
-def _hardware_report(design, solved):
+def _hardware_report(design, solved, report):
     """The BOM for the fetched McMaster parts, and remember them on the doc.
 
     Every joint mates one IN and one OUT boss: 2n+2 joints around the link
@@ -366,10 +393,13 @@ def _hardware_report(design, solved):
     lines = ['Hardware BOM (%d joints: %d around the cycle, %d crossings):'
              % (joints, 2 * n + 2, n - 1)]
     if bearing_pn:
-        lines.append('  %d x thrust bearing %s' % (joints, bearing_pn))
+        lines.append('  %d x thrust bearing %s (%d placed)'
+                     % (joints, bearing_pn,
+                        report.get('hardware_bearings', 0)))
     if bushing_pn:
-        lines.append('  %d x bushing %s (one per boss bore)'
-                     % (2 * joints, bushing_pn))
+        lines.append('  %d x bushing %s (one per boss bore, %d placed)'
+                     % (2 * joints, bushing_pn,
+                        report.get('hardware_bushings', 0)))
     for name, part_number in (('mcm_bearing', bearing_pn),
                               ('mcm_bushing', bushing_pn)):
         if part_number:
@@ -405,7 +435,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 timed = _log_timings(reporter)
             solved = parameters.read_solved(design)
             message = audit.format_report(report, solved)
-            hardware_note = _hardware_report(design, solved)
+            hardware_note = _hardware_report(design, solved, report)
             if hardware_note:
                 message += '\n\n' + hardware_note
             if timed:

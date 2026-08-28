@@ -535,17 +535,17 @@ def hardware_autofill(bearing, bushing, bar_thickness_mm, bar_width_mm):
     warnings = []
 
     if bearing is not None:
-        expressions['bearing_thickness'] = '%.4g mm' % bearing['thickness_mm']
+        expressions['bearing_thickness'] = '%.6g mm' % bearing['thickness_mm']
 
     if bushing is not None:
-        expressions['bearing_OD'] = '%.4g mm' % bushing['od_mm']
+        expressions['bearing_OD'] = '%.6g mm' % bushing['od_mm']
         spare = bushing['length_mm'] - bar_thickness_mm
         if spare <= 0:
             raise McMasterError(
                 'Bushing length (%.3g mm) must exceed bar_thickness (%.3g mm) '
                 'for the boss to hold it - pick a longer bushing or a thinner bar.'
                 % (bushing['length_mm'], bar_thickness_mm))
-        expressions['l_offset'] = '%.4g mm' % (spare / 2.0)
+        expressions['l_offset'] = '%.6g mm' % (spare / 2.0)
 
     if bearing is not None and bearing['od_mm'] is not None \
             and bearing['od_mm'] > bar_width_mm:
@@ -560,3 +560,53 @@ def hardware_autofill(bearing, bushing, bar_thickness_mm, bar_width_mm):
             '(%.3g mm) - the pin will not pass through both.'
             % (bearing['id_mm'], bushing['id_mm']))
     return expressions, warnings
+
+
+# Autofill writes 6 significant figures, so a fetched part and the parameter
+# it drove agree to well under this. Anything past it is a manual edit.
+_MATCH_TOL_MM = 0.02
+
+
+def hardware_problem(bearing, bushing, sizes_mm):
+    """Why the fetched parts conflict with the current geometry, or None.
+
+    Unlike hardware_autofill's warnings, these are hard stops: the dialog
+    feeds the result into its validation, so Generate/Update stays disabled
+    until the conflict is resolved (change the geometry, re-Fetch, or clear
+    the part number to go back to manual dimensions).
+
+    sizes_mm carries the *current* dialog values in mm: bar_width,
+    bar_thickness, l_offset, bearing_OD, bearing_thickness.
+    """
+    if bearing is not None:
+        if bearing.get('od_mm') is not None \
+                and bearing['od_mm'] > sizes_mm['bar_width'] + _MATCH_TOL_MM:
+            return ('Thrust bearing OD (%.3g mm) exceeds bar_width (the boss '
+                    'diameter, %.3g mm) - pick a smaller bearing or widen the '
+                    'bar.' % (bearing['od_mm'], sizes_mm['bar_width']))
+        if abs(bearing['thickness_mm'] - sizes_mm['bearing_thickness']) > _MATCH_TOL_MM:
+            return ('bearing_thickness (%.4g mm) does not match thrust bearing '
+                    '%s (%.4g mm) - press Fetch to re-apply, or clear the part '
+                    'number for manual dimensions.'
+                    % (sizes_mm['bearing_thickness'],
+                       bearing.get('description') or 'part',
+                       bearing['thickness_mm']))
+    if bushing is not None:
+        if abs(bushing['od_mm'] - sizes_mm['bearing_OD']) > _MATCH_TOL_MM:
+            return ('bearing_OD (the boss bore, %.4g mm) does not match the '
+                    'press-fit bushing OD (%.4g mm) - press Fetch to re-apply, '
+                    'or clear the part number for manual dimensions.'
+                    % (sizes_mm['bearing_OD'], bushing['od_mm']))
+        boss_height = sizes_mm['bar_thickness'] + 2.0 * sizes_mm['l_offset']
+        if abs(bushing['length_mm'] - boss_height) > 2.0 * _MATCH_TOL_MM:
+            return ('Boss height (bar_thickness + 2*l_offset = %.4g mm) does '
+                    'not match the bushing length (%.4g mm) - press Fetch to '
+                    're-derive l_offset, or clear the part number.'
+                    % (boss_height, bushing['length_mm']))
+    if bearing is not None and bushing is not None \
+            and bearing.get('id_mm') is not None and bushing.get('id_mm') is not None \
+            and bearing['id_mm'] + _MATCH_TOL_MM < bushing['id_mm']:
+        return ('Thrust bearing bore (%.3g mm) is smaller than the bushing '
+                'bore (%.3g mm) - the pin cannot pass through both; pick '
+                'matching bores.' % (bearing['id_mm'], bushing['id_mm']))
+    return None

@@ -20,6 +20,7 @@ from . import sketching as sk
 from . import frame as frame_mod
 from . import audit
 from . import custom_feature
+from . import hardware as hardware_mod
 from . import progress
 from . import solids
 from . import PREFIX, COMPONENT_NAME
@@ -36,7 +37,9 @@ def purge_previous(design):
     removed = 0
     for occ in list(root.occurrences):
         try:
-            if occ.component.name.startswith(COMPONENT_NAME):
+            # COMPONENT_NAME catches packed runs; PREFIX catches hardware
+            # occurrences built loose in the root (Part Design fallback).
+            if occ.component.name.startswith((COMPONENT_NAME, PREFIX)):
                 if occ.deleteMe():
                     removed += 1
         except Exception:
@@ -247,8 +250,14 @@ def build_end(comp, centre_ent, previous_spoke, previous_pin_point,
 
 def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
           clockwise=False, flip_start=False, purge=True, pack=True,
-          with_solids=False, with_audit=True, reporter=None):
+          with_solids=False, with_audit=True, reporter=None, hardware=None):
     """Generate the whole skeleton. Returns an audit report.
+
+    `hardware` is an optional {'bearing_pn': ..., 'bushing_pn': ...} of
+    McMaster part numbers whose STEP files the dialog's Fetch cached; their
+    occurrences are placed at every joint after the solid stage. Like a
+    solids failure, a hardware failure lands in the report, never loses the
+    build.
 
     with_audit=False skips the final full-timeline recompute and the audit's
     sketch-by-sketch re-measurement, for callers that never show the report.
@@ -282,11 +291,13 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
 
     if reporter is not None:
         # purge + parameter write + skeleton (spine, 2 seeds, 2(n-1) longs,
-        # 2 ends) + audit + solid stage (2n+2 bars, 6n+2 bosses, audit).
+        # 2 ends) + audit + solid stage (2n+2 bars, 6n+2 bosses, audit)
+        # + hardware occurrences.
         n_planned = preview['n']
         reporter.begin((1 if purge else 0) + 1 + (2 * n_planned + 3)
                        + (1 if with_audit else 0)
-                       + ((8 * n_planned + 5) if with_solids else 0))
+                       + ((8 * n_planned + 5) if with_solids else 0)
+                       + hardware_mod.plan_ticks(hardware, n_planned))
 
     if purge:
         purge_previous(design)
@@ -415,6 +426,20 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
         except Exception as err:
             report['problems'].append('solid stage failed: %s'
                                       % str(err).splitlines()[-1])
+
+    if hardware and (hardware.get('bearing_pn') or hardware.get('bushing_pn')):
+        try:
+            hardware_report = hardware_mod.place(
+                design, comp, frame, solved, hardware, reporter)
+            report['hardware_bearings'] = hardware_report['bearings']
+            report['hardware_bushings'] = hardware_report['bushings']
+            report['problems'].extend(hardware_report['problems'])
+        except progress.Cancelled:
+            raise
+        except Exception as err:
+            report['problems'].append('hardware stage failed: %s'
+                                      % str(err).splitlines()[-1])
+
     if pack:
         report['component'] = comp.name
 
