@@ -18,7 +18,10 @@ Radial layout, from the solids stage's boss recipe: mating bosses gap by
 bearing_thickness centred on the sphere, so the bearing's axial midpoint sits
 exactly at radius R; each boss spans from R +/- bearing_thickness/2 outward
 by bar_thickness + 2*l_offset, so its press-fit bushing centres at
-R +/- (bearing_thickness/2 + (bar_thickness + 2*l_offset)/2).
+R +/- (bearing_thickness/2 + (bar_thickness + 2*l_offset)/2) - the boss is
+symmetric about the bar, so that is also the bar's mid-plane, and a bushing
+no longer than bar_thickness (enforced by mcmaster.hardware_problem) sits
+wholly inside the bar.
 """
 
 import adsk.core

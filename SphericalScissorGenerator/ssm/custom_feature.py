@@ -99,7 +99,7 @@ OPTION_IDS = ('clockwise', 'flip_start', 'solids')
 
 
 def wrap(design, root, component, start_index, solved, overrides,
-         selections=None, options=None):
+         selections=None, options=None, end_index=None):
     """Group the timeline range into one custom feature.
 
     `selections` ({'centrePoint': entity, 'spinePlane': ..., 'startPlane': ...})
@@ -114,6 +114,13 @@ def wrap(design, root, component, start_index, solved, overrides,
     Which component owns the feature is not obvious for a packed build: the
     sketches live in the sub-component while the occurrence that created it
     lives in the root timeline. Both are attempted, widest first.
+
+    `end_index` (default: the last timeline item) ends the range early. The
+    builder uses it to keep imported McMaster hardware OUT of the feature:
+    an import brings Base Features owned by the imported parts' own
+    components, and Fusion refuses a custom feature spanning features of
+    more than one component - which silently cost every hardware build its
+    editable feature.
     """
     definition = STORE.get('definition')
     if definition is None:
@@ -126,27 +133,32 @@ def wrap(design, root, component, start_index, solved, overrides,
         return None
     if timeline.count <= start_index:
         return None
+    last_index = timeline.count - 1 if end_index is None \
+        else min(end_index, timeline.count - 1)
+    if last_index < start_index:
+        return None
 
     attempts = []
     if root is not None:
         attempts.append(('root', root, start_index))
     if component is not None and component is not root:
         # Skip the occurrence node: start at the first feature inside it.
-        attempts.append(('component', component, min(start_index + 1, timeline.count - 1)))
+        attempts.append(('component', component, min(start_index + 1, last_index)))
 
     for _label, owner, first_index in attempts:
-        feature = _try_wrap(timeline, owner, definition, first_index, overrides,
-                            selections)
+        feature = _try_wrap(timeline, owner, definition, first_index, last_index,
+                            overrides, selections)
         if feature is not None:
             _store_options(feature, options)
             return feature
     return None
 
 
-def _try_wrap(timeline, owner, definition, first_index, overrides, selections):
+def _try_wrap(timeline, owner, definition, first_index, last_index, overrides,
+              selections):
     try:
         first = timeline.item(first_index).entity
-        last = timeline.item(timeline.count - 1).entity
+        last = timeline.item(last_index).entity
         if first is None or last is None:
             return None
 

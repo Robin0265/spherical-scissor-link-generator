@@ -23,7 +23,7 @@ COMPONENT_NAME = 'Spherical Scissor'
 
 # Bumped on every behavioural change. Logged with the stage timings so a
 # stale module (the add-in only reloads ssm at Stop/Run) is always visible.
-VERSION = '2026.08.28.4-open-part-pages'
+VERSION = '2026.11.01.2-fusion-mcmaster-insert'
 
 __all__ = ['PREFIX', 'COMPONENT_NAME', 'vectors', 'parameters', 'frame',
            'sketching', 'builder', 'solids', 'draft', 'progress', 'audit',

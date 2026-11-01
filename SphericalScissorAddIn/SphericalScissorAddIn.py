@@ -31,12 +31,15 @@ for _stale in [name for name in list(sys.modules)
                if name == 'ssm' or name.startswith('ssm.')]:
     del sys.modules[_stale]
 
-from ssm import command, custom_feature  # noqa: E402
+from ssm import command, custom_feature, mcm_insert  # noqa: E402
 
 PANEL_ID = 'SSMPanel'
 PANEL_NAME = 'Spherical Scissor'
 TAB_ID = 'ToolsTab'          # the UTILITIES tab
-CONTROL_ID = 'SSMGenerateControl'
+# A toolbar control's ID is always its command definition's ID; it cannot be
+# chosen separately. (addCommand's second argument is a *position* ID - the
+# existing control to sit next to - not the new control's ID.)
+CONTROL_ID = command.CMD_ID
 
 _app = None
 _ui = None
@@ -75,11 +78,19 @@ def run(context):
         # Double-clicking the feature in the timeline reopens this dialog.
         custom_feature.set_edit_command(command.CMD_ID)
 
+        # The dialog's Insert button drives Fusion's own McMaster insert,
+        # which needs an event that outlives the dialog.
+        mcm_insert.install(_app, _ui)
+
         panel = _panel()
-        if panel.controls.itemById(CONTROL_ID) is None:
-            control = panel.controls.addCommand(definition, CONTROL_ID)
-            control.isPromoted = True
-            control.isPromotedByDefault = True
+        # A button left behind by an earlier load points at the definition
+        # register() just deleted; replace it rather than keeping a dead one.
+        stale = panel.controls.itemById(CONTROL_ID)
+        if stale:
+            stale.deleteMe()
+        control = panel.controls.addCommand(definition)
+        control.isPromoted = True
+        control.isPromotedByDefault = True
     except Exception:
         if _ui:
             _ui.messageBox('Spherical Scissor add-in failed to load:\n{}'
@@ -101,6 +112,7 @@ def stop(context):
                 panel.deleteMe()
 
         command.unregister(ui)
+        mcm_insert.uninstall()
         custom_feature.forget_definition()
     except Exception:
         # A failure while unloading must not block Fusion from unloading.

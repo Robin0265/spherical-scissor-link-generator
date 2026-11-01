@@ -427,7 +427,11 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
             report['problems'].append('solid stage failed: %s'
                                       % str(err).splitlines()[-1])
 
+    # Where the hardware's timeline items begin, so the custom feature can
+    # stop short of them (see custom_feature.wrap's end_index).
+    hardware_start = None
     if hardware and (hardware.get('bearing_pn') or hardware.get('bushing_pn')):
+        hardware_start = design.timeline.count
         try:
             hardware_report = hardware_mod.place(
                 design, comp, frame, solved, hardware, reporter)
@@ -448,16 +452,34 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
         # folder. It is only available from the add-in, and Fusion may still
         # refuse it, so the timeline group remains the fallback. The two are
         # alternatives - both would try to own the same timeline range.
+        has_hardware_items = (hardware_start is not None
+                              and design.timeline.count > hardware_start)
         feature = custom_feature.wrap(
             design, root, comp, group_start, solved, overrides,
             selections={'centrePoint': centre_ent,
                         'spinePlane': spine_plane_ent,
                         'startPlane': start_plane_ent},
             options={'clockwise': clockwise, 'flip_start': flip_start,
-                     'solids': with_solids})
+                     'solids': with_solids},
+            end_index=hardware_start - 1 if has_hardware_items else None)
         if feature is not None:
             report['custom_feature'] = feature.name
             report['grouped'] = True
+            if has_hardware_items:
+                # The feature collapsed the geometry into one node; fold the
+                # occurrence, that node and the hardware after it into one
+                # group so the run is still a single timeline entry. The
+                # feature stays editable inside the group.
+                try:
+                    design.timeline.moveToEnd()
+                    group = design.timeline.timelineGroups.add(
+                        group_start, design.timeline.count - 1)
+                    group.name = COMPONENT_NAME
+                    group.isCollapsed = True
+                except Exception:
+                    report['problems'].append(
+                        'note: hardware left ungrouped after the %s feature '
+                        '(Fusion refused the timeline group).' % feature.name)
         else:
             design.timeline.moveToEnd()
             group = design.timeline.timelineGroups.add(

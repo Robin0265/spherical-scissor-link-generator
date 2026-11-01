@@ -52,6 +52,23 @@ def part_url(part_number):
     return 'https://www.mcmaster.com/%s/' % part_number
 
 
+# McMaster part numbers are digits, a catalogue letter (sometimes two), then
+# digits: 7806K58, 6658K727, 91251A540. Anything else - in particular a
+# number still being typed ('7', '780', '7806K') - is not looked up at all.
+_PART_NUMBER = re.compile(r'^\d{3,6}[A-Z]{1,2}\d{1,5}$')
+
+
+def is_part_number(part_number):
+    return bool(_PART_NUMBER.match((part_number or '').strip().upper()))
+
+
+def _require_part_number(part_number):
+    if not is_part_number(part_number):
+        raise McMasterError(
+            '"%s" is not a complete McMaster part number (e.g. 7806K58).'
+            % part_number)
+
+
 # ---------------------------------------------------------------------------
 # Config + cache locations
 
@@ -161,20 +178,44 @@ def downloads_dirs():
     return unique
 
 
-def find_downloaded_step(part_number, folder=None):
-    """The newest '<PN>*.step' in the Downloads folder(s), or None.
+def names_part(stem, part_number):
+    """True when a file stem is exactly this part number, optionally followed
+    by a separator and a description ('7806K58', '7806K58_Thrust Bearing',
+    '7806K58 (1)'). A bare prefix test is NOT enough: '7' and '7806K5' are
+    prefixes of '7806K58', which is how every keystroke of a part number
+    being typed used to "find" the finished download and cache it under the
+    partial number."""
+    stem, part_number = stem.upper(), part_number.strip().upper()
+    if stem == part_number:
+        return True
+    return stem.startswith(part_number) and stem[len(part_number)] in '_ -.('
 
-    McMaster names its downloads '<PN>_<FAMILY DESCRIPTION>.STEP', so a
-    prefix match is enough and the tail doubles as a description.
+
+_names_part = names_part  # older name
+
+
+def description_from_name(name):
+    """'7806K58_Ball Thrust Bearing' -> 'Ball Thrust Bearing' ('' if none).
+    McMaster names downloads and Fusion's inserted components this way."""
+    return name.split('_', 1)[1].strip() if '_' in name else ''
+
+
+def find_downloaded_step(part_number, folder=None):
+    """The newest '<PN>[_description].step' in the Downloads folder(s), or None.
+
+    McMaster names its downloads '<PN>_<FAMILY DESCRIPTION>.STEP'; the part
+    number must match exactly up to the separator (see _names_part).
     """
-    prefix = part_number.upper()
+    part_number = part_number.strip().upper()
+    if not is_part_number(part_number):
+        return None
     candidates = []
     for place in ([folder] if folder else downloads_dirs()):
         if not os.path.isdir(place):
             continue
         for name in os.listdir(place):
-            if name.upper().startswith(prefix) \
-                    and name.upper().endswith(('.STEP', '.STP')):
+            stem, ext = os.path.splitext(name)
+            if ext.upper() in ('.STEP', '.STP') and names_part(stem, part_number):
                 candidates.append(os.path.join(place, name))
     if not candidates:
         return None
@@ -203,6 +244,8 @@ def _step_unit_scale(text):
         return 25.4
     if re.search(r'SI_UNIT\s*\(\s*\.MILLI\.\s*,\s*\.METRE\.\s*\)', text):
         return 1.0
+    if re.search(r'SI_UNIT\s*\(\s*\.CENTI\.\s*,\s*\.METRE\.\s*\)', text):
+        return 10.0   # Fusion's own STEP export can declare centimetres
     if re.search(r'SI_UNIT\s*\(\s*\$?\s*,\s*\.METRE\.\s*\)', text):
         return 1000.0
     return 1.0  # McMaster exports declare units; a bare file is assumed mm
@@ -272,7 +315,7 @@ def dims_from_step(path, kind):
     extent = (max(spans) - min(spans)) * scale
 
     name = os.path.splitext(os.path.basename(path))[0]
-    description = name.split('_', 1)[1].strip().title() if '_' in name else ''
+    description = description_from_name(name).title()
     dims = {
         'od_mm': 2.0 * outer * scale,
         'id_mm': 2.0 * inner * scale if inner is not None else None,
@@ -302,7 +345,7 @@ class Session:
         self._opener = urllib.request.build_opener(
             urllib.request.HTTPSHandler(context=context))
 
-    def _request(self, method, path, body=None, want_bytes=False):
+    def _request(self, method, path, body=None, want_bytes=False, retry=True):
         request = urllib.request.Request(API_BASE + path, method=method)
         request.add_header('Content-Type', 'application/json')
         if self._token:
@@ -312,7 +355,16 @@ class Session:
             with self._opener.open(request, data=data, timeout=TIMEOUT_S) as resp:
                 payload = resp.read()
         except urllib.error.HTTPError as err:
-            raise McMasterError(_readable_http_error(err))
+            category, detail = _http_error_parts(err)
+            # Tokens expire after 24 h, and the session lives as long as
+            # Fusion does: log in again once and retry, rather than failing
+            # every lookup until the add-in is restarted.
+            if retry and self._token and path != '/v1/login' \
+                    and category in _TOKEN_ERRORS:
+                self._token = None
+                self.login()
+                return self._request(method, path, body, want_bytes, retry=False)
+            raise McMasterError(_readable_http_error(err.code, detail))
         except urllib.error.URLError as err:
             raise McMasterError('Could not reach api.mcmaster.com: %s' % err.reason)
         if want_bytes:
@@ -353,16 +405,27 @@ class Session:
         return self._request('GET', relative_path, want_bytes=True)
 
 
-def _readable_http_error(err):
-    detail = ''
+# ErrorMessage categories that mean "log in again", per the API docs.
+_TOKEN_ERRORS = ('EXPIRED_AUTHORIZATION_TOKEN', 'INVALID_AUTHORIZATION_TOKEN')
+
+
+def _http_error_parts(err):
+    """(ErrorMessage category, readable detail) from an API error body."""
     try:
         body = json.loads(err.read().decode('utf-8'))
-        detail = body.get('ErrorDescription') or body.get('ErrorMessage') or ''
     except Exception:
-        pass
-    if err.code == 401:
+        return '', ''
+    finally:
+        err.close()  # the error carries the open response
+    category = (body.get('ErrorMessage') or '').upper()
+    detail = body.get('ErrorDescription') or body.get('ErrorMessage') or ''
+    return category, detail
+
+
+def _readable_http_error(code, detail):
+    if code == 401:
         return 'McMaster API login failed%s' % (': ' + detail if detail else '.')
-    return 'McMaster API error %d%s' % (err.code, ': ' + detail if detail else '')
+    return 'McMaster API error %d%s' % (code, ': ' + detail if detail else '')
 
 
 # Module-level session so repeated fetches from the dialog reuse the token.
@@ -515,6 +578,7 @@ def fetch_hardware(part_number, kind, local_only=False):
         raise McMasterError('Enter a part number first.')
     if kind not in ('bearing', 'bushing'):
         raise ValueError('kind must be bearing or bushing')
+    _require_part_number(part_number)
 
     dims = cached_dims(part_number)
     if dims is not None:
@@ -532,13 +596,17 @@ def fetch_hardware(part_number, kind, local_only=False):
         return dims, 'api'
 
     step = cached_step(part_number)
+    measured = step
     if step is None:
         downloaded = find_downloaded_step(part_number)
         if downloaded is not None:
             step = os.path.join(cache_dir(), part_number + '.step')
             shutil.copyfile(downloaded, step)
+            # Measure the original: its name ('<PN>_<description>.STEP')
+            # carries the description, which the cache copy's name does not.
+            measured = downloaded
     if step is not None:
-        dims = dims_from_step(step, kind)
+        dims = dims_from_step(measured, kind)
         save_dims(part_number, dims)
         return dims, 'step'
 
@@ -562,6 +630,7 @@ def ensure_step(part_number):
     moment the CAD is actually needed - Fetch never touches CAD.
     """
     part_number = part_number.strip().upper()
+    _require_part_number(part_number)
     step = cached_step(part_number)
     if step is not None:
         return step
@@ -589,16 +658,18 @@ def ensure_step(part_number):
 def hardware_autofill(bearing, bushing, bar_thickness_mm, bar_width_mm):
     """Parameter expressions implied by the fetched parts.
 
-    Only bearing_OD is a straight copy (the boss bore takes the press-fit
-    bushing's OD). l_offset is derived from the generator's own boss recipe:
-    the boss extends bar_thickness + 2*l_offset symmetrically, and the
-    bushing must sit flush through it, so l_offset makes the boss height
-    equal the bushing length. bearing_thickness is the thrust bearing's
-    thickness (the gap the solids stage leaves between mating bosses).
+    bearing_OD is a straight copy (the boss bore takes the press-fit
+    bushing's OD) and bearing_thickness is the thrust bearing's thickness
+    (the gap the solids stage leaves between mating bosses).
+
+    The bushing sits INSIDE the bar thickness, centred on the bar (the
+    hardware stage centres it in the boss, and the boss is symmetric about
+    the bar), so its length is a limit - length <= bar_thickness - not a
+    source for any parameter: l_offset stays whatever the user set.
+    hardware_problem enforces the limit.
 
     Returns (expressions, warnings): expressions is {param name: 'x mm'},
-    warnings is a list of readable strings for the status line. A geometric
-    impossibility (bushing shorter than the bar) raises instead.
+    warnings is a list of readable strings for the status line.
     """
     expressions = {}
     warnings = []
@@ -608,13 +679,6 @@ def hardware_autofill(bearing, bushing, bar_thickness_mm, bar_width_mm):
 
     if bushing is not None:
         expressions['bearing_OD'] = '%.6g mm' % bushing['od_mm']
-        spare = bushing['length_mm'] - bar_thickness_mm
-        if spare <= 0:
-            raise McMasterError(
-                'Bushing length (%.3g mm) must exceed bar_thickness (%.3g mm) '
-                'for the boss to hold it - pick a longer bushing or a thinner bar.'
-                % (bushing['length_mm'], bar_thickness_mm))
-        expressions['l_offset'] = '%.6g mm' % (spare / 2.0)
 
     if bearing is not None and bearing['od_mm'] is not None \
             and bearing['od_mm'] > bar_width_mm:
@@ -661,17 +725,23 @@ def hardware_problem(bearing, bushing, sizes_mm):
                        bearing.get('description') or 'part',
                        bearing['thickness_mm']))
     if bushing is not None:
+        # The bushing presses into a bore in the boss, and the boss diameter
+        # is bar_width - so the bushing must be narrower than the bar or the
+        # bore cuts straight through the boss wall.
+        if bushing['od_mm'] >= sizes_mm['bar_width'] - _MATCH_TOL_MM:
+            return ('Bushing OD (%.3g mm) leaves no wall in the boss (bar_width '
+                    '= boss diameter, %.3g mm) - widen the bar or pick a '
+                    'smaller bushing.' % (bushing['od_mm'], sizes_mm['bar_width']))
         if abs(bushing['od_mm'] - sizes_mm['bearing_OD']) > _MATCH_TOL_MM:
             return ('bearing_OD (the boss bore, %.4g mm) does not match the '
                     'press-fit bushing OD (%.4g mm) - press Fetch to re-apply, '
                     'or clear the part number for manual dimensions.'
                     % (sizes_mm['bearing_OD'], bushing['od_mm']))
-        boss_height = sizes_mm['bar_thickness'] + 2.0 * sizes_mm['l_offset']
-        if abs(bushing['length_mm'] - boss_height) > 2.0 * _MATCH_TOL_MM:
-            return ('Boss height (bar_thickness + 2*l_offset = %.4g mm) does '
-                    'not match the bushing length (%.4g mm) - press Fetch to '
-                    're-derive l_offset, or clear the part number.'
-                    % (boss_height, bushing['length_mm']))
+        if bushing['length_mm'] > sizes_mm['bar_thickness'] + _MATCH_TOL_MM:
+            return ('Bushing length (%.4g mm) exceeds bar_thickness (%.4g mm) - '
+                    'the bushing must fit within the bar: pick a shorter '
+                    'bushing or a thicker bar.'
+                    % (bushing['length_mm'], sizes_mm['bar_thickness']))
     if bearing is not None and bushing is not None \
             and bearing.get('id_mm') is not None and bushing.get('id_mm') is not None \
             and bearing['id_mm'] + _MATCH_TOL_MM < bushing['id_mm']:

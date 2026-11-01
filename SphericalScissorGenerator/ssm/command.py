@@ -21,7 +21,8 @@ import adsk.core
 import adsk.fusion
 
 from . import PREFIX, VERSION
-from . import audit, builder, custom_feature, draft, mcmaster, parameters, progress
+from . import (audit, builder, custom_feature, draft, mcm_insert, mcmaster,
+               parameters, progress)
 
 _app = None
 _ui = None
@@ -32,9 +33,9 @@ _handlers = []
 _dialog_handlers = []
 
 # Dimensions fetched from McMaster for the current dialog, keyed 'bearing' /
-# 'bushing', plus the part numbers they came from. l_offset re-derives from
-# the bushing whenever bar_thickness changes, so the fetch has to outlive the
-# event that applied it.
+# 'bushing', plus the part numbers they came from. Validation keeps checking
+# the geometry against them (e.g. bushing length <= bar_thickness) after the
+# autofill, so the fetch has to outlive the event that applied it.
 _fetched = {'bearing': None, 'bushing': None,
             'bearing_pn': '', 'bushing_pn': ''}
 
@@ -44,6 +45,14 @@ _fetch_running = False
 
 # Attribute group/names used to remember part numbers in the document.
 ATTR_GROUP = 'SSM'
+
+# The open dialog's edit target (None for a new mechanism), kept so the
+# McMaster insert can reopen the dialog on the same feature.
+_dialog = {'edited': None}
+# Dialog state saved while Fusion's McMaster insert has the screen, and the
+# state handed to the reopened dialog. See _insert_parts / _reopen.
+_resume_pending = None
+_resume = None
 
 
 def _bind(app, ui):
@@ -246,6 +255,118 @@ def _open_part_pages(inputs):
                 % ', '.join(pn for pn, _u in urls), False)
 
 
+def _pending_parts(inputs):
+    """([(kind, part number) not available locally], [local], [invalid])."""
+    pending, local, invalid = [], [], []
+    for kind, input_id in (('bearing', 'mcmBearing'), ('bushing', 'mcmBushing')):
+        part_number = (inputs.itemById(input_id).value or '').strip().upper()
+        if not part_number:
+            continue
+        if not mcmaster.is_part_number(part_number):
+            invalid.append(part_number)
+        elif mcmaster.cached_step(part_number) or mcmaster.cached_dims(part_number) \
+                or mcmaster.find_downloaded_step(part_number):
+            local.append(part_number)
+        else:
+            pending.append((kind, part_number))
+    return pending, local, invalid
+
+
+def _insert_parts(inputs):
+    """The Insert button: get missing parts through Fusion's own
+    Insert McMaster-Carr Component (see mcm_insert). The dialog closes while
+    Fusion's McMaster window is up and reopens by itself afterwards, with
+    everything entered so far restored. Falls back to the browser when the
+    hook is unavailable (script entry point, or no McMaster command)."""
+    global _resume_pending
+    pending, local, invalid = _pending_parts(inputs)
+    if invalid:
+        _set_status(inputs, '%s: not a complete McMaster part number (e.g. '
+                    '7806K58).' % ', '.join(invalid), True)
+        return
+    if not pending:
+        if local:
+            _set_status(inputs, 'Already available locally: %s. Nothing to '
+                        'insert.' % ', '.join(local), False)
+        else:
+            _set_status(inputs, 'Enter a part number first.', True)
+        return
+    if not mcm_insert.available():
+        _open_part_pages(inputs)
+        return
+    if mcm_insert.busy():
+        _set_status(inputs, 'A McMaster insert is already in progress.', True)
+        return
+    design = adsk.fusion.Design.cast(_app.activeProduct)
+    gathered = _gather(inputs)
+    _remember_part_numbers(design, gathered)
+    _resume_pending = {'gathered': gathered, 'edited': _dialog['edited']}
+    _set_status(inputs, 'Opening Fusion\'s McMaster-Carr insert for %s.'
+                % ', '.join(pn for _k, pn in pending), False)
+    mcm_insert.begin(pending, _reopen)
+
+
+def _reopen(notes):
+    """mcm_insert's on_done: reopen the dialog where the user left it."""
+    global _resume, _resume_pending
+    if _resume_pending is None:
+        return
+    _resume = dict(_resume_pending, notes=notes)
+    _resume_pending = None
+    edited = _resume.get('edited')
+    try:
+        _ui.activeSelections.clear()
+        if edited is not None and edited.isValid:
+            _ui.activeSelections.add(edited)   # reopens in edit mode
+    except Exception:
+        pass
+    definition = _ui.commandDefinitions.itemById(CMD_ID)
+    if definition is not None:
+        definition.execute()
+
+
+def _apply_resume(inputs):
+    """Restore the state saved by _insert_parts into a fresh dialog.
+    Returns the insert's notes for the status line ('' when not resuming)."""
+    global _resume
+    resume, _resume = _resume, None
+    if not resume:
+        return ''
+    gathered = resume['gathered']
+    for name, expression in gathered['overrides'].items():
+        field = inputs.itemById('p_' + name)
+        try:
+            if field is not None:
+                if name == 'n':
+                    field.value = int(float(expression))
+                else:
+                    field.expression = expression
+        except Exception:
+            pass
+    for input_id, key in (('centrePoint', 'centre_ent'),
+                          ('spinePlane', 'spine_plane_ent'),
+                          ('startPlane', 'start_plane_ent')):
+        selection, entity = inputs.itemById(input_id), gathered.get(key)
+        try:
+            if selection is not None and selection.selectionCount == 0 \
+                    and entity is not None and entity.isValid:
+                selection.addSelection(entity)
+        except Exception:
+            pass
+    direction = inputs.itemById('direction')
+    for i in range(direction.listItems.count):
+        item = direction.listItems.item(i)
+        if item.name.startswith('Clockwise') == bool(gathered['clockwise']):
+            item.isSelected = True
+    for input_id, key in (('flipStart', 'flip_start'), ('solids', 'solids'),
+                          ('pack', 'pack'), ('purge', 'purge')):
+        inputs.itemById(input_id).value = bool(gathered[key])
+    inputs.itemById('mcmBearing').value = gathered['bearing_pn']
+    inputs.itemById('mcmBushing').value = gathered['bushing_pn']
+    inputs.itemById('mcm').isExpanded = True
+    return '\n'.join(resume.get('notes') or [])
+
+
 def _run_fetch(inputs):
     """The Fetch button: metadata lookup with a visible progress dialog.
 
@@ -307,21 +428,29 @@ def _run_fetch(inputs):
             lines.append(_apply_fetched(inputs))
         except mcmaster.McMasterError as err:
             errors.append(str(err))
-    _set_status(inputs, '\n'.join(lines + errors) or 'Nothing to fetch.',
-                bool(errors))
+    if errors:
+        _set_status(inputs, '\n'.join(lines + errors), True)
+    else:
+        _show_state(inputs, '\n'.join(lines) or 'Nothing to fetch.')
 
 
 def _auto_resolve(inputs):
     """Pick up locally-available parts (cache, finished downloads) with no
-    button press. Quiet by design: a part that is not there yet just stays
-    pending. Returns True when new dimensions were applied."""
+    button press. Quiet by design: a part that is not there yet (or a number
+    still being typed) just stays pending.
+
+    Returns the autofill message when new dimensions were applied, else ''.
+    The caller shows it through _show_state, so a conflict the new part
+    creates is reported in the same breath instead of being hidden behind a
+    green autofill line while Generate/Update sits disabled."""
     resolved = False
     for kind, input_id in (('bearing', 'mcmBearing'), ('bushing', 'mcmBushing')):
         field = inputs.itemById(input_id)
         if field is None:
             continue
         part_number = (field.value or '').strip().upper()
-        if not part_number or _fetched[kind + '_pn'] == part_number:
+        if not part_number or _fetched[kind + '_pn'] == part_number \
+                or not mcmaster.is_part_number(part_number):
             continue
         try:
             dims, _source = mcmaster.fetch_hardware(
@@ -331,12 +460,42 @@ def _auto_resolve(inputs):
         _fetched[kind] = dims
         _fetched[kind + '_pn'] = part_number
         resolved = True
-    if resolved:
-        try:
-            _set_status(inputs, _apply_fetched(inputs), False)
-        except mcmaster.McMasterError:
-            pass  # the conflict reaches the user through validation
-    return resolved
+    if not resolved:
+        return ''
+    try:
+        return _apply_fetched(inputs)
+    except mcmaster.McMasterError as err:
+        return str(err)
+
+
+def _show_state(inputs, lead=''):
+    """Status line for the dialog's current state.
+
+    `lead` (an autofill/fetch summary) is shown first. Whenever validation
+    would disable Generate/Update, the reason is shown in red - the same
+    _problem() the ValidateHandler uses, so the two can never disagree.
+    """
+    design = adsk.fusion.Design.cast(_app.activeProduct)
+    gathered = _gather(inputs)
+    problem = _problem(design, gathered)
+    if problem:
+        prefix = lead + '\n' if lead else ''
+        _set_status(inputs, prefix + 'Cannot build yet: ' + problem, True)
+        return
+    if lead:
+        _set_status(inputs, lead, False)
+        return
+    solved = parameters.solve_expressions(design, gathered['overrides'])
+    note = (' Solid links build on Generate (not shown in preview).'
+            if gathered['solids'] else '')
+    _set_status(inputs,
+                'Ready: %d rhombi, %d links. alpha %.2f&deg;, delta %.2f&deg;, '
+                'gamma %.2f&deg;, lambda %.2f&deg;.%s'
+                % (solved['n'], 2 * solved['n'] + 2,
+                   math.degrees(solved['alpha']), math.degrees(solved['delta']),
+                   math.degrees(solved['gamma']), math.degrees(solved['lam']),
+                   note),
+                False)
 
 
 def _resolve_for_build(design, gathered):
@@ -400,10 +559,50 @@ def _remember_part_numbers(design, gathered):
             pass
 
 
+def _all_inputs(args):
+    """The command's TOP-LEVEL inputs for an InputChanged / ValidateInputs
+    event.
+
+    args.inputs is not that: it is the collection holding the input that
+    fired, so for an input inside a group (every field in this dialog) it is
+    only the group's children. itemById then misses everything outside the
+    group - the status box included - which made Fetch and Open part pages
+    look dead: their messages went to an input that was not found, and the
+    autofill crashed on bar_thickness/bar_width coming back as None.
+    """
+    try:
+        command = adsk.core.Command.cast(args.firingEvent.sender)
+        if command is not None:
+            return command.commandInputs
+    except Exception:
+        pass
+    try:
+        if args.input is not None:
+            return args.input.parentCommand.commandInputs
+    except Exception:
+        pass
+    return args.inputs
+
+
+def _report_error(inputs, where):
+    """Make an unexpected handler failure visible instead of swallowing it:
+    traceback to the Text Commands palette, a short note in the status line.
+    Never raises."""
+    try:
+        _app.log('ssm %s: error in %s\n%s' % (VERSION, where, traceback.format_exc()))
+    except Exception:
+        pass
+    try:
+        _set_status(inputs, 'Internal error in %s - details in the Text Commands '
+                            'palette (View > Show Text Commands).' % where, True)
+    except Exception:
+        pass
+
+
 class ValidateHandler(adsk.core.ValidateInputsEventHandler):
     def notify(self, args):
         try:
-            inputs = args.inputs
+            inputs = _all_inputs(args)
             design = adsk.fusion.Design.cast(_app.activeProduct)
             problem = _problem(design, _gather(inputs))
             args.areInputsValid = problem is None
@@ -413,8 +612,9 @@ class ValidateHandler(adsk.core.ValidateInputsEventHandler):
 
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args):
+        inputs = None
         try:
-            inputs = args.inputs
+            inputs = _all_inputs(args)
             changed = args.input.id if args.input else ''
             if changed == 'mcmFetch':
                 # The bool input is a button: the click flips it True, and
@@ -429,7 +629,7 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 button = inputs.itemById('mcmOpen')
                 if button.value:
                     button.value = False
-                    _open_part_pages(inputs)
+                    _insert_parts(inputs)
                 return
             if changed in ('mcmBearing', 'mcmBushing'):
                 # Once the text no longer names the fetched part, that part
@@ -444,34 +644,14 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
             # Any dialog interaction quietly picks up parts whose download
             # has finished since the last event - no Fetch press needed. On
             # a pickup the status already reports what was applied.
-            if _auto_resolve(inputs):
-                return
-            if changed == 'p_bar_thickness' and _fetched['bushing']:
-                # The boss must stay flush with the fetched bushing.
-                try:
-                    _apply_fetched(inputs)
-                except mcmaster.McMasterError as err:
-                    _set_status(inputs, str(err), True)
-                    return
-            design = adsk.fusion.Design.cast(_app.activeProduct)
-            gathered = _gather(inputs)
-            problem = _problem(design, gathered)
-            if problem:
-                _set_status(inputs, problem, True)
-            else:
-                solved = parameters.solve_expressions(design, gathered['overrides'])
-                note = (' Solid links build on Generate (not shown in preview).'
-                        if gathered['solids'] else '')
-                _set_status(inputs,
-                            'Ready: %d rhombi, %d links. alpha %.2f&deg;, delta %.2f&deg;, '
-                            'gamma %.2f&deg;, lambda %.2f&deg;.%s'
-                            % (solved['n'], 2 * solved['n'] + 2,
-                               math.degrees(solved['alpha']), math.degrees(solved['delta']),
-                               math.degrees(solved['gamma']), math.degrees(solved['lam']),
-                               note),
-                            False)
+            applied = _auto_resolve(inputs)
+            # A bar_thickness edit needs no re-autofill: the bushing only
+            # limits it (length <= bar_thickness), and _show_state reports a
+            # violation through the same check validation uses.
+            _show_state(inputs, applied)
         except Exception:
-            pass
+            _report_error(inputs, 'the dialog (%s)' % (
+                args.input.id if args.input else 'input change'))
 
 
 class PreviewHandler(adsk.core.CommandEventHandler):
@@ -621,6 +801,7 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             # Capture the edit target BEFORE creating inputs: activating
             # selection inputs clears the active selection Fusion handed us.
             edited = custom_feature.edit_target(_ui)
+            _dialog['edited'] = edited
 
             cmd = args.command
             # Fetched dimensions belong to one dialog session: a stale bushing
@@ -716,19 +897,21 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'mcmFetch', 'Fetch specs and autofill', False, '', False)
             fetch.text = 'Fetch'
             fetch.tooltip = (
-                'Fill bearing_OD, bearing_thickness and l_offset from the '
+                'Fill bearing_OD and bearing_thickness from the '
                 'parts\' dimensions - retrieved over HTTP from the Product '
                 'Information API when configured, else from the local cache '
                 'or a STEP already in Downloads. No browser is opened. The '
                 'fields stay editable, and Generate imports the parts.')
             open_pages = hardware.children.addBoolValueInput(
-                'mcmOpen', 'Open part pages to download STEP', False, '', False)
-            open_pages.text = 'Open part pages'
+                'mcmOpen', 'Insert missing parts via Fusion', False, '', False)
+            open_pages.text = 'Insert'
             open_pages.tooltip = (
-                'Open the typed part numbers on mcmaster.com in your browser '
-                'so you can download each 3-D STEP (free, no login). Drop '
-                'them in Downloads and the tool picks them up automatically '
-                'at Fetch or Generate. Only needed once per new part.')
+                'For each typed part number not yet available locally: copies '
+                'it to the clipboard and opens Fusion\'s Insert McMaster-Carr '
+                'Component. Paste it into McMaster\'s search (Ctrl+V, Enter), '
+                'choose 3-D STEP and Save - the rest is automatic. This dialog '
+                'closes meanwhile and comes back by itself with the part '
+                'cached and autofilled. Only needed once per new part.')
             hardware.isExpanded = bool(attr_default('mcm_bearing')
                                        or attr_default('mcm_bushing'))
 
@@ -786,8 +969,15 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                                     'a start plane.', False)
 
             # Remembered part numbers whose data is already local (cache or
-            # a finished download) autofill as soon as the dialog opens.
-            _auto_resolve(inputs)
+            # a finished download) autofill as soon as the dialog opens -
+            # and if they conflict with the geometry, say so right away.
+            # Back from Fusion's McMaster insert: restore what was entered;
+            # the freshly cached parts then autofill like any other.
+            resumed = _apply_resume(inputs)
+            applied = _auto_resolve(inputs)
+            lead = '\n'.join(text for text in (resumed, applied) if text)
+            if lead:
+                _show_state(inputs, lead)
         except Exception:
             if _ui:
                 _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
