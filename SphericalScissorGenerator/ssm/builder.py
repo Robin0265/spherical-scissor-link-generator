@@ -22,6 +22,7 @@ from . import audit
 from . import custom_feature
 from . import progress
 from . import solids
+from . import joints
 from . import PREFIX, COMPONENT_NAME
 
 
@@ -34,6 +35,8 @@ def purge_previous(design):
     """
     root = design.rootComponent
     removed = 0
+    # The contact set references the link occurrences about to go.
+    joints.remove_contact_set(design)
     for occ in list(root.occurrences):
         try:
             if occ.component.name.startswith(COMPONENT_NAME):
@@ -79,6 +82,71 @@ def purge_previous(design):
 AXIS_REF_NAME = PREFIX + 'Axis_Ref'
 
 
+def build_input_planes(comp, axis_ent, frame, solved):
+    """The spine and start planes, derived from the input axis.
+
+    The dialog only asks for the centre and joint A's revolute axis. The rest
+    of the skeleton is built on two planes, so they are made here, inside the
+    mechanism component (purged with it):
+
+    - SSM_Plane_Spine through the input axis and a hidden reference line from
+      the centre along frame.eF - the levelled direction frame.resolve_axis
+      chose - so the spine runs parallel to the top plane by default.
+    - SSM_Plane_Start through the input axis at 90 deg to the spine plane;
+      their intersection is the input axis, i.e. SSM_Axis_OA.
+
+    Both reference the input axis itself, so moving that axis re-orients the
+    mechanism on recompute. A cylindrical face is first turned into a
+    construction axis (planes need a linear entity). Returns
+    (spine_plane, start_plane); raises if Fusion orients either plane
+    differently from the frame, which would build a mirrored mechanism that
+    still passes every closure check.
+    """
+    linear = axis_ent
+    face = adsk.fusion.BRepFace.cast(axis_ent)
+    if face is not None:
+        axis_input = comp.constructionAxes.createInput()
+        axis_input.setByCircularFace(face)
+        linear = comp.constructionAxes.add(axis_input)
+        linear.name = PREFIX + 'Axis_Input'
+
+    sketch = sk.new_sketch(comp, comp.xYConstructionPlane, PREFIX + 'Input_Ref')
+    radius = solved['R']
+    tip = vec.p(frame.C.x + radius * frame.eF.x, frame.C.y + radius * frame.eF.y,
+                frame.C.z + radius * frame.eF.z)
+    reference = sketch.sketchCurves.sketchLines.addByTwoPoints(
+        sketch.modelToSketchSpace(frame.C), sketch.modelToSketchSpace(tip))
+    reference.isConstruction = True
+    # Fixed: it only fixes the spine plane's rotation about the axis at build
+    # time, and the audit requires every SSM sketch to be fully constrained.
+    # The line leaves the sketch plane (it runs along the spine direction), and
+    # for such a line Fusion only reports the sketch fully constrained once
+    # its end points are fixed as well.
+    reference.isFixed = True
+    reference.startSketchPoint.isFixed = True
+    reference.endSketchPoint.isFixed = True
+
+    plane_input = comp.constructionPlanes.createInput()
+    plane_input.setByTwoEdges(linear, reference)
+    spine = comp.constructionPlanes.add(plane_input)
+    spine.name = PREFIX + 'Plane_Spine'
+
+    plane_input = comp.constructionPlanes.createInput()
+    plane_input.setByAngle(linear, adsk.core.ValueInput.createByString('90 deg'),
+                           spine)
+    start = comp.constructionPlanes.add(plane_input)
+    start.name = PREFIX + 'Plane_Start'
+
+    for plane, normal, label in ((spine, frame.eN, 'spine'),
+                                 (start, frame.eF, 'start')):
+        got = vec.unit(vec.plane_of(plane).normal)
+        if abs(abs(vec.dot(got, normal)) - 1.0) > 1e-6:
+            raise RuntimeError('The derived %s plane came out %.3f deg off its '
+                               'intended orientation.' % (label, math.degrees(
+                                   math.acos(min(1.0, abs(vec.dot(got, normal)))))))
+    return spine, start
+
+
 def build_axis_reference(comp, plane_ent, centre_ent, axis, frame, solved):
     """A link_Radius-long stand-in for SSM_Axis_OA, in a sketch of its own.
 
@@ -109,11 +177,20 @@ def build_axis_reference(comp, plane_ent, centre_ent, axis, frame, solved):
         line.isConstruction = True
         constraints = sketch.geometricConstraints
         constraints.addCoincident(line.startSketchPoint, centre_point)
-        # Point-on-line rather than collinear: the far end still needs a
-        # length, and "on the axis + link_Radius from the centre" has two
-        # solutions, so the nudge above is what puts the solver on the right
-        # one - the same technique the link arcs use.
-        constraints.addCoincident(line.endSketchPoint, axis_ref)
+        # PARALLEL to the projected axis. The start sits on the centre, which
+        # is on the axis, so parallel means collinear - but stated that way it
+        # survives the degenerate case the derived spine plane makes common:
+        # that plane's origin IS the centre, so the projected axis often lies
+        # exactly on one of the sketch's own axes. There, point-on-line
+        # collapsed the far end onto the centre for an axis along the sketch
+        # x-axis (over-constrained by the length below) and collinear was
+        # refused for one along the y-axis; parallel solved every case tried
+        # (origin X/Y/Z axes, a tilted 3D line, each flipped and clockwise).
+        # The far end still needs a length, and "along the axis +
+        # link_Radius from the centre" has two solutions, so the nudge above
+        # is what puts the solver on the right one - the same technique the
+        # link arcs use.
+        constraints.addParallel(line, axis_ref)
         dimension = sketch.sketchDimensions.addDistanceDimension(
             line.startSketchPoint, line.endSketchPoint,
             adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
@@ -382,11 +459,23 @@ def ground_occurrence(occurrence):
     return False
 
 
-def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
+def build(design, centre_ent, axis_ent, overrides=None,
           clockwise=False, flip_start=False, purge=True, pack=True,
           with_solids=False, with_audit=True, reporter=None,
-          ground=True, hide_skeleton=False):
+          ground=True, hide_skeleton=False, movable=True, contact=True):
     """Generate the whole skeleton. Returns an audit report.
+
+    movable=True (needs with_solids and a packed component) turns the links
+    into components joined by revolute joints - span + swivel at joint A,
+    a revolute at every other pin - so the mechanism can be dragged; see
+    joints.py. contact=True adds the SSM_Links contact set. The skeleton
+    sketches are hidden then: they stay at the built pose while links move.
+
+    `centre_ent` is the sphere centre (a point) and `axis_ent` the input axis:
+    joint A's revolute axis, which must pass through the centre. The spine
+    plane is derived from it (parallel to the top plane by default, see
+    frame.resolve_axis / build_input_planes); `flip_start` puts A at the other
+    end of the axis and `clockwise` reverses the fan.
 
     with_audit=False skips the final full-timeline recompute and the audit's
     sketch-by-sketch re-measurement, for callers that never show the report.
@@ -425,8 +514,7 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     # Solve and check before touching the document.
     preview = params.solve_expressions(design, overrides)
     centre_world = vec.point_of(centre_ent)
-    frame = frame_mod.resolve(centre_world, spine_plane_ent, start_plane_ent,
-                              clockwise, flip_start)
+    frame = frame_mod.resolve_axis(centre_world, axis_ent, clockwise, flip_start)
 
     if reporter is not None:
         # purge + parameter write + skeleton (spine, 2 seeds, 2(n-1) longs,
@@ -496,6 +584,10 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     component_start = design.timeline.count
 
     radius, delta, gamma, n = solved['R'], solved['delta'], solved['gamma'], solved['n']
+
+    # The two planes the skeleton is built on, derived from the input axis.
+    spine_plane_ent, start_plane_ent = build_input_planes(
+        comp, axis_ent, frame, solved)
 
     # The line where the two planes meet is both the direction of joint A and
     # the hinge the seed link planes are rotated about, so it is made once here.
@@ -582,6 +674,8 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
     if pack:
         report['component'] = comp.name
 
+    feature = None
+    count_after_wrap = None
     if group_start is not None and design.timeline.count > group_start:
         # Prefer a real custom feature: one editable timeline node instead of a
         # folder. It is only available from the add-in, and Fusion may still
@@ -590,26 +684,52 @@ def build(design, centre_ent, spine_plane_ent, start_plane_ent, overrides=None,
         feature = custom_feature.wrap(
             design, root, comp, group_start, solved, overrides,
             selections={'centrePoint': centre_ent,
-                        'spinePlane': spine_plane_ent,
-                        'startPlane': start_plane_ent},
+                        'inputAxis': axis_ent},
             options={'clockwise': clockwise, 'flip_start': flip_start,
                      'solids': with_solids, 'ground': ground,
-                     'hide_skeleton': hide_skeleton},
+                     'hide_skeleton': hide_skeleton, 'movable': movable,
+                     'contact': contact},
             component_start=component_start)
         if feature is not None:
             report['custom_feature'] = feature.name
-            report['grouped'] = True
+        design.timeline.moveToEnd()
+        count_after_wrap = design.timeline.count
+
+    # Movable links come AFTER the custom feature: they split the bodies into
+    # components, and a custom feature cannot span several components.
+    made_movable = False
+    # Without solid links there is nothing to joint: a skeleton-only build is
+    # simply not movable. Only solids that could not be jointed are reported.
+    if movable and with_solids:
+        if occurrence is None or comp.bRepBodies.count == 0:
+            report['problems'].append(
+                'movable links need the solid links in a packed component - '
+                'built rigid.')
         else:
-            design.timeline.moveToEnd()
+            try:
+                movable_report = joints.make_movable(design, occurrence, solved,
+                                                     frame.C, contact=contact)
+                report['problems'].extend(movable_report.pop('problems'))
+                report['movable'] = movable_report
+                made_movable = True
+            except Exception as err:
+                report['problems'].append('movable-link stage failed: %s'
+                                          % str(err).splitlines()[-1])
+
+    if group_start is not None and count_after_wrap is not None:
+        design.timeline.moveToEnd()
+        if feature is None or design.timeline.count > count_after_wrap:
+            # One collapsed group: the run (custom feature or loose features)
+            # plus the link components and joints after it.
             group = design.timeline.timelineGroups.add(
                 group_start, design.timeline.count - 1)
             group.name = COMPONENT_NAME
             group.isCollapsed = True
-            report['grouped'] = True
+        report['grouped'] = True
 
     # Visibility is display state, not a feature: it writes nothing to the
     # timeline, so unlike the grounding above it can safely happen last.
-    hidden = hide_scaffolding(comp, hide_skeleton)
+    hidden = hide_scaffolding(comp, hide_skeleton or made_movable)
     if hidden:
         report['hidden'] = hidden
         report['hid_sketches'] = hide_skeleton

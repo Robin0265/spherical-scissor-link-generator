@@ -93,16 +93,17 @@ def is_available():
 
 # Dependency ids deliberately match the dialog's selection-input ids, so the
 # edit path can map them back without a translation table.
-SELECTION_IDS = ('centrePoint', 'spinePlane', 'startPlane')
+SELECTION_IDS = ('centrePoint', 'inputAxis')
 ATTR_GROUP = 'SSM'
-OPTION_IDS = ('clockwise', 'flip_start', 'solids', 'ground', 'hide_skeleton')
+OPTION_IDS = ('clockwise', 'flip_start', 'solids', 'ground', 'hide_skeleton',
+              'movable', 'contact')
 
 
 def wrap(design, root, component, start_index, solved, overrides,
          selections=None, options=None, component_start=None):
     """Group the timeline range into one custom feature.
 
-    `selections` ({'centrePoint': entity, 'spinePlane': ..., 'startPlane': ...})
+    `selections` ({'centrePoint': entity, 'inputAxis': entity})
     is stored as feature dependencies and `options` ({'clockwise': bool, ...})
     as attributes, so that editing the feature later can restore the dialog
     exactly as it was.
@@ -266,21 +267,21 @@ def _recover_selections(design):
         for comp in components:
             if len(out) == len(SELECTION_IDS):
                 break
-            if 'spinePlane' not in out or 'startPlane' not in out:
-                for axis in comp.constructionAxes:
-                    if not axis.name.endswith('Axis_OA'):
+            if 'inputAxis' not in out:
+                # The derived spine plane is defined by (input axis, reference
+                # line); a cylindrical-face input went through SSM_Axis_Input.
+                for plane in comp.constructionPlanes:
+                    if not plane.name.endswith('Plane_Spine'):
                         continue
                     try:
-                        one = axis.definition.planarEntityOne
-                        two = axis.definition.planarEntityTwo
-                        if one is not None and one.isValid:
-                            out.setdefault('spinePlane', one)
-                        if two is not None and two.isValid:
-                            out.setdefault('startPlane', two)
+                        source = plane.definition.linearEntityOne
+                        if source is not None and getattr(source, 'name', '').endswith('Axis_Input'):
+                            source = source.definition.circularFace
+                        if source is not None and source.isValid:
+                            out['inputAxis'] = source
                     except Exception:
                         pass
-                    if 'spinePlane' in out and 'startPlane' in out:
-                        break
+                    break
             if 'centrePoint' not in out:
                 for sketch in comp.sketches:
                     if not sketch.name.endswith('Spine'):

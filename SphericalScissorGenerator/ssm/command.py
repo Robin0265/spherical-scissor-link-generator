@@ -66,8 +66,7 @@ def _gather(inputs):
 
     return {
         'centre_ent': _selected(inputs, 'centrePoint'),
-        'spine_plane_ent': _selected(inputs, 'spinePlane'),
-        'start_plane_ent': _selected(inputs, 'startPlane'),
+        'axis_ent': _selected(inputs, 'inputAxis'),
         'overrides': overrides,
         'clockwise': clockwise,
         'flip_start': inputs.itemById('flipStart').value,
@@ -76,6 +75,8 @@ def _gather(inputs):
         'solids': inputs.itemById('solids').value,
         'ground': _flag(inputs, 'ground', True),
         'hide_skeleton': _flag(inputs, 'hideSkeleton', False),
+        'movable': _flag(inputs, 'movable', True),
+        'contact': _flag(inputs, 'contact', True),
     }
 
 
@@ -93,17 +94,14 @@ def _problem(design, args):
     """
     if args['centre_ent'] is None:
         return 'Select the sphere centre.'
-    if args['spine_plane_ent'] is None:
-        return 'Select the spine plane.'
-    if args['start_plane_ent'] is None:
-        return 'Select the start plane.'
+    if args['axis_ent'] is None:
+        return 'Select the input axis (joint A\'s revolute axis).'
     try:
         parameters.solve_expressions(design, args['overrides'])
         from . import frame as frame_mod
         from . import vectors as vec
-        frame_mod.resolve(vec.point_of(args['centre_ent']),
-                          args['spine_plane_ent'], args['start_plane_ent'],
-                          args['clockwise'], args['flip_start'])
+        frame_mod.resolve_axis(vec.point_of(args['centre_ent']), args['axis_ent'],
+                               args['clockwise'], args['flip_start'])
     except RuntimeError as err:
         return str(err)
     except Exception as err:  # malformed selection, etc.
@@ -126,11 +124,12 @@ def _build(design, args, with_solids=None, reporter=None):
     if with_solids is None:
         with_solids = args['solids']
     return builder.build(
-        design, args['centre_ent'], args['spine_plane_ent'], args['start_plane_ent'],
+        design, args['centre_ent'], args['axis_ent'],
         overrides=args['overrides'], clockwise=args['clockwise'],
         flip_start=args['flip_start'], purge=args['purge'], pack=args['pack'],
         with_solids=with_solids, reporter=reporter,
-        ground=args['ground'], hide_skeleton=args['hide_skeleton'])
+        ground=args['ground'], hide_skeleton=args['hide_skeleton'],
+        movable=args['movable'], contact=args['contact'])
 
 
 class ValidateHandler(adsk.core.ValidateInputsEventHandler):
@@ -288,28 +287,25 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 centre.addSelectionFilter(filt)
             centre.setSelectionLimits(1, 1)
 
-            spine = inputs.addSelectionInput(
-                'spinePlane', 'Spine plane',
-                'Plane the rhombi chain runs in; must contain the centre')
-            for filt in ('ConstructionPlanes', 'PlanarFaces'):
-                spine.addSelectionFilter(filt)
-            spine.setSelectionLimits(1, 1)
-
-            start = inputs.addSelectionInput(
-                'startPlane', 'Start plane',
-                'Where the chain begins. The first joint sits on this plane and '
-                'the spine leaves it at a right angle, so it must be '
-                'perpendicular to the spine plane and contain the centre.')
-            for filt in ('ConstructionPlanes', 'PlanarFaces'):
-                start.addSelectionFilter(filt)
-            start.setSelectionLimits(1, 1)
+            axis = inputs.addSelectionInput(
+                'inputAxis', 'Input axis',
+                'Joint A\'s revolute axis: a construction axis, sketch line, '
+                'straight edge or cylindrical face (e.g. a motor shaft) that '
+                'passes through the sphere centre. Joint A sits on it at '
+                'link_Radius from the centre; the spine starts out parallel '
+                'to the top plane.')
+            for filt in ('ConstructionLines', 'SketchLines', 'LinearEdges',
+                         'CylindricalFaces'):
+                axis.addSelectionFilter(filt)
+            axis.setSelectionLimits(1, 1)
 
             direction = inputs.addDropDownCommandInput(
                 'direction', 'Direction', adsk.core.DropDownStyles.TextListDropDownStyle)
             direction.listItems.add('Counter-clockwise', True)
             direction.listItems.add('Clockwise', False)
-            direction.tooltip = ('Which way the chain fans out from the start '
-                                 'plane, seen looking along the spine plane normal.')
+            direction.tooltip = ('Which way the chain fans out from joint A, '
+                                 'seen from above (looking down onto the top '
+                                 'plane).')
 
             design = adsk.fusion.Design.cast(_app.activeProduct)
 
@@ -337,7 +333,7 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             options = inputs.addGroupCommandInput('opts', 'Options')
             options.children.addBoolValueInput(
-                'flipStart', 'Start from the opposite side', True, '', False)
+                'flipStart', 'Joint A at the other end of the axis', True, '', False)
             options.children.addBoolValueInput(
                 'solids', 'Build solid links (bars, bosses, bores)', True, '', True)
             options.children.addBoolValueInput(
@@ -348,6 +344,21 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             options.children.addBoolValueInput(
                 'hideSkeleton', 'Hide the spine and link sketches too',
                 True, '', False)
+            movable_box = options.children.addBoolValueInput(
+                'movable', 'Movable links (revolute joints)', True, '', True)
+            movable_box.tooltip = (
+                'One component per link with a revolute joint at every pin. '
+                'Joint A carries the two degrees of freedom: SSM_Swivel turns '
+                'the spine about the input axis, SSM_Span opens/folds the '
+                'scissor within span_min..span_max. Needs solid links. The '
+                'skeleton sketches are hidden, since they stay at the built '
+                'pose.')
+            contact_box = options.children.addBoolValueInput(
+                'contact', 'Stop links at contact (contact set)', True, '', True)
+            contact_box.tooltip = (
+                'Adds the SSM_Links contact set so dragging stops when links '
+                'touch. Turns contact analysis on (contact sets only) if it '
+                'is off. Only applies to interactive drags and Drive Joints.')
             options.children.addBoolValueInput(
                 'purge', 'Delete features from previous runs (%s*)' % PREFIX,
                 True, '', True)
@@ -381,7 +392,9 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 if 'solids' in opts:
                     inputs.itemById('solids').value = opts['solids']
                 for key, input_id in (('ground', 'ground'),
-                                      ('hide_skeleton', 'hideSkeleton')):
+                                      ('hide_skeleton', 'hideSkeleton'),
+                                      ('movable', 'movable'),
+                                      ('contact', 'contact')):
                     field = inputs.itemById(input_id)
                     if key in opts and field is not None:
                         field.value = opts[key]
@@ -410,8 +423,8 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                                            len(custom_feature.SELECTION_IDS)),
                                 True)
             else:
-                _set_status(inputs, 'Select a centre point, a spine plane, and '
-                                    'a start plane.', False)
+                _set_status(inputs, 'Select the sphere centre and the input '
+                                    'axis (joint A\'s revolute axis).', False)
         except Exception:
             if _ui:
                 _ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))

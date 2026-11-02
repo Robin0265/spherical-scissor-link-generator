@@ -14,6 +14,8 @@ DRIVING_PARAMS = [
     ('span_max', '135 deg', 'deg', 'Maximum designed spanned angle'),
     ('n', '3', '', 'Number of rhombi'),
     ('span_target', '30 deg', 'deg', 'Spanned angle of this configuration'),
+    ('span_min', '5 deg', 'deg',
+     'Smallest spanned angle the span joint allows (movable links)'),
     ('l_offset', '1.5 mm', 'mm', 'Radial clearance each boss protrudes past the bar'),
     ('bar_thickness', '3 mm', 'mm', 'Link bar thickness (radial)'),
     ('bar_width', '8 mm', 'mm', 'Link bar width (lateral); also the boss diameter'),
@@ -88,6 +90,11 @@ def read_solved(design):
         'gamma': value('gamma_'),
         'lam': value('lambda'),
         'span_target': value('span_target'),
+        'span_max': value('span_max'),
+        # Documents built before span_min existed simply get the default.
+        'span_min': (value('span_min')
+                     if design.userParameters.itemByName('span_min') is not None
+                     else math.radians(5.0)),
         'n': int(round(value('n'))),
     }
 
@@ -119,6 +126,12 @@ def solve_expressions(design, overrides=None):
         raise RuntimeError('span_target must be positive.')
     if raw['span_max'] <= 0:
         raise RuntimeError('span_max must be positive.')
+    if not 0 < raw['span_min'] < raw['span_target']:
+        raise RuntimeError(
+            'span_min (%.2f deg) must be positive and below span_target '
+            '(%.2f deg): it is the span joint\'s lower limit, and the built '
+            'pose has to lie inside the joint\'s range.'
+            % (math.degrees(raw['span_min']), math.degrees(raw['span_target'])))
 
     alpha_arg = math.cos(raw['beta']) * math.cos(raw['span_max'] / (2 * n))
     if abs(alpha_arg) > 1:
@@ -151,6 +164,8 @@ def solve_expressions(design, overrides=None):
         'gamma': gamma,
         'lam': math.acos(lam_arg),
         'span_target': raw['span_target'],
+        'span_max': raw['span_max'],
+        'span_min': raw['span_min'],
         'n': n,
     }
 

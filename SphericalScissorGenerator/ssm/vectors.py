@@ -55,6 +55,48 @@ def point_of(entity):
     raise RuntimeError('The selected entity does not resolve to a point.')
 
 
+def line_of(entity):
+    """(origin Point3D, unit direction Vector3D) of a line-like entity, in world
+    space: a construction axis, a sketch line, a straight edge, or a cylindrical
+    face (its axis). The direction follows the entity's own sense - the axis
+    direction, start -> end for a sketch line or an edge."""
+    geometry = None
+    for attr in ('worldGeometry', 'geometry'):
+        if hasattr(entity, attr):
+            try:
+                geometry = getattr(entity, attr)
+            except Exception:
+                geometry = None
+            if geometry is not None:
+                break
+    infinite = adsk.core.InfiniteLine3D.cast(geometry)
+    if infinite:
+        origin, direction = infinite.origin, infinite.direction
+    else:
+        segment = adsk.core.Line3D.cast(geometry)
+        cylinder = adsk.core.Cylinder.cast(geometry)
+        if segment:
+            origin = segment.startPoint
+            direction = segment.startPoint.vectorTo(segment.endPoint)
+        elif cylinder:
+            origin, direction = cylinder.origin, cylinder.axis
+        else:
+            raise RuntimeError('The input axis must be a construction axis, a '
+                               'sketch line, a straight edge or a cylindrical '
+                               'face.')
+    direction = direction.copy()
+    if not direction.normalize():
+        raise RuntimeError('The input axis has no direction (zero length).')
+    return origin, direction
+
+
+def distance_to_line(origin, direction, point):
+    """Perpendicular distance from a world point to the line origin + t*dir
+    (direction must be unit length)."""
+    to_point = origin.vectorTo(point)
+    return to_point.crossProduct(direction).length
+
+
 def distance_to_plane(plane, point):
     """Perpendicular distance from a world point to an adsk.core.Plane."""
     n, o = plane.normal, plane.origin

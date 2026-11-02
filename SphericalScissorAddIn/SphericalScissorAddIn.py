@@ -36,7 +36,10 @@ from ssm import command, custom_feature  # noqa: E402
 PANEL_ID = 'SSMPanel'
 PANEL_NAME = 'Spherical Scissor'
 TAB_ID = 'ToolsTab'          # the UTILITIES tab
-CONTROL_ID = 'SSMGenerateControl'
+# A toolbar control's ID is always its command definition's ID; it cannot be
+# chosen separately. (addCommand's second argument is a *position* ID - the
+# existing control to sit next to - not the new control's ID.)
+CONTROL_ID = command.CMD_ID
 
 _app = None
 _ui = None
@@ -76,10 +79,14 @@ def run(context):
         custom_feature.set_edit_command(command.CMD_ID)
 
         panel = _panel()
-        if panel.controls.itemById(CONTROL_ID) is None:
-            control = panel.controls.addCommand(definition, CONTROL_ID)
-            control.isPromoted = True
-            control.isPromotedByDefault = True
+        # A button left behind by an earlier load points at the definition
+        # register() just deleted; replace it rather than keeping a dead one.
+        stale = panel.controls.itemById(CONTROL_ID)
+        if stale:
+            stale.deleteMe()
+        control = panel.controls.addCommand(definition)
+        control.isPromoted = True
+        control.isPromotedByDefault = True
     except Exception:
         if _ui:
             _ui.messageBox('Spherical Scissor add-in failed to load:\n{}'

@@ -58,33 +58,37 @@ line at the bottom says either what is wrong or what is about to be built.
 | Input | Meaning |
 | --- | --- |
 | **Sphere centre** | A point at the centre of rotation (RCM). The origin point, a construction point, a sketch point, or a vertex. |
-| **Spine plane** | The plane the rhombi chain runs in. Must contain the centre. |
-| **Start plane** | Where the chain begins. Joint A lands on this plane, and the spine leaves it at a right angle. |
-| **Direction** | Counter-clockwise or clockwise, seen looking along the spine plane normal — which way the chain fans out from the start plane. |
+| **Input axis** | Joint A's revolute axis: a construction axis, sketch line, straight edge, or cylindrical face (e.g. a motor shaft). Must pass through the centre. Joint A sits on it at `link_Radius` from the centre. |
+| **Direction** | Counter-clockwise or clockwise, seen from above (looking down onto the top plane) — which way the chain fans out from joint A. |
 | `link_Radius` | Radius of the tracked sphere. |
 | `beta` | Conflict / bearing intrusion angle. |
 | `span_max` | Maximum designed spanned angle — sizes the links, draws nothing. |
 | `n` | Number of rhombi. |
 | `span_target` | Spanned angle of *this* configuration — this is what gets drawn. |
+| `span_min` | Smallest span the span joint allows (movable links); must be below `span_target`. Default 5°. |
 | `l_offset`, `bar_thickness`, `bar_width`, `bearing_OD` | Carried into the parameter table for the later solid stage. |
 
-The two planes do the orienting. They meet in a line; that line is joint A's
-direction, and it becomes `SSM_Axis_OA` — the same axis the seed link planes are
-rotated about by ±`lambda`. The spine sketch holds its first spoke collinear
-with a bounded stand-in for it (`SSM_Axis_Ref`, below), so the start plane stays
-a **live driver**: move it and the whole chain re-orients.
+The input axis does the orienting. The spine plane is derived from it: the
+plane through the axis that is as level as the top plane allows — exactly
+parallel to the top plane for a horizontal axis, and the front plane's
+orientation for a vertical one (Y-up or Z-up is read from Fusion's
+preferences). The build creates it as `SSM_Plane_Spine`, together with
+`SSM_Plane_Start` through the axis at 90° to it; their intersection is the
+input axis again and becomes `SSM_Axis_OA` — the axis the seed link planes are
+rotated about by ±`lambda`. Both planes reference the input axis, so moving
+the axis re-orients the mechanism on recompute. The spine sketch holds its
+first spoke along a bounded stand-in for OA (`SSM_Axis_Ref`, below).
 
-Because the spine is a curve inside the spine plane, it can only leave the start
-plane at a right angle if the two planes are themselves perpendicular. That is
-checked, along with both planes passing through the centre; you get a specific
-message rather than silently wrong geometry.
+The centre must lie on the input axis (within 0.1 µm); otherwise you get a
+specific message rather than silently wrong geometry.
 
 Options: **Build solid links** (on by default) adds the physical bodies — bars,
 bearing bosses, bores — after the skeleton; expect roughly 15–30 s depending on
 n, and note the **live preview always shows the skeleton only** (the solids are
 far too slow to rebuild per keystroke; they build when you press Generate).
-**Start from the opposite side** puts A at the other end of the plane
-intersection. **Delete features from previous runs** removes everything named
+**Joint A at the other end of the axis** puts A on the opposite side of the
+centre (by default A lies in the axis's own direction: a construction axis's
+direction, or start → end of a sketch line or edge). **Delete features from previous runs** removes everything named
 `SSM_*` so re-running iterates in place rather than piling up duplicates; it
 never touches geometry the script did not create. **Live preview** toggles the
 draft overlay; it costs almost nothing, since it is viewport graphics rather
@@ -92,6 +96,37 @@ than a rebuild. **Ground it** (on by default) pins the generated component so
 it cannot be dragged off the centre point. **Hide the spine and link sketches
 too** (off by default) clears the skeleton as well; the construction planes,
 the axis reference and the solid stage's sketches are hidden either way.
+
+**Movable links (revolute joints)** (on by default; needs solid links) makes
+the mechanism draggable: every link becomes its own component
+(`SSM_Link_<name>`), every pin gets an as-built revolute joint
+(`SSM_Pin_<a>_<b>`), and joint A carries the mechanism's two degrees of
+freedom:
+
+| Joint | Between | Motion |
+| --- | --- | --- |
+| `SSM_Swivel` | grounded `SSM_Frame` ↔ Seed_P | turns the spine about the input axis; free |
+| `SSM_Span` | Seed_P ↔ Seed_N | opens / folds the scissor; limited to `span_min` … `span_max` |
+
+Every joint axis passes through the sphere centre, so any pose Fusion allows
+keeps every link on the sphere. The span limits are exact: the seed planes sit
+at ±`lambda`(span) about OA, so the joint angle is 2·(lambda(span) −
+lambda(`span_target`)); they keep the scissor out of the flat fold at span 0,
+a singular pose the joint solver cannot come back from. Drag any link, or use
+**Drive Joints** on `SSM_Swivel` / `SSM_Span`. The skeleton sketches are
+hidden in this mode because they stay at the built pose; **Update** rebuilds
+at `span_target` with the swivel at 0.
+
+**Stop links at contact** (on by default) adds the `SSM_Links` contact set, so
+a drag stops when links touch (and switches contact analysis on, contact sets
+only, if it was off). With the default dimensions the links meet at a span of
+about 16° when folding; switch contact off (Assemble ▸ Disable Contact) to
+reach `span_min`. Contact only applies to interactive drags and Drive Joints,
+not to joint values set from a script.
+
+The joint stage runs after the custom feature in the timeline (a custom
+feature cannot span several components) and is grouped with it into one
+collapsed `Spherical Scissor` entry.
 
 If the origin point is not selectable, switch on the **Origin** folder in the
 browser.
@@ -173,7 +208,10 @@ everything inside the package. (This is the pragmatic stand-in for a true
 "custom feature" with edit-in-dialog; see the note at the end.)
 
 ```
-SSM_Axis_OA          spine plane x start plane: joint A's direction
+SSM_Input_Ref        hidden: fixed reference line, centre -> levelled spine direction
+SSM_Plane_Spine      through the input axis + SSM_Input_Ref (level with the top plane)
+SSM_Plane_Start      through the input axis, 90 deg to the spine plane
+SSM_Axis_OA          spine plane x start plane = the input axis: joint A's direction
 SSM_Axis_Ref         hidden: a link_Radius line along OA, for the spine
 SSM_Spine            spine arc (span_target) + 2n+1 radial fan
 SSM_Plane_Seed_P/N   spine plane rotated by +/- lambda about OA

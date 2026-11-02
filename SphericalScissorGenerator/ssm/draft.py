@@ -102,9 +102,9 @@ def draw(design, args):
     """Redraw the draft for the current dialog state."""
     clear()
     solved = params.solve_expressions(design, args['overrides'])
-    frame = frame_mod.resolve(vec.point_of(args['centre_ent']),
-                              args['spine_plane_ent'], args['start_plane_ent'],
-                              args['clockwise'], args['flip_start'])
+    frame = frame_mod.resolve_axis(vec.point_of(args['centre_ent']),
+                                   args['axis_ent'], args['clockwise'],
+                                   args['flip_start'])
     spine, links = _strips(frame, solved)
 
     group = design.rootComponent.customGraphicsGroups.add()

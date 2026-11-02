@@ -232,3 +232,5 @@ typings/
 # uses the legacy "type": "python" schema. Use the repo-root .vscode/launch.json.
 SphericalScissorGenerator/.vscode/
 !SphericalScissorAddIn/*.manifest
+
+.mcmaster-cache/*

@@ -106,11 +106,14 @@ def run(context):
         design.designType = adsk.fusion.DesignTypes.ParametricDesignType
         root = design.rootComponent
         centre = root.originConstructionPoint
-        spine = root.xZConstructionPlane
-        start = root.xYConstructionPlane
+        # The input axis (joint A's revolute axis). The origin X axis is the
+        # most likely real choice and the case that used to over-constrain
+        # SSM_Axis_Ref (the derived spine plane's origin is the centre, so
+        # the projected axis lies on a sketch axis).
+        axis = root.xConstructionAxis
 
         def build(**kwargs):
-            return builder.build(design, centre, spine, start, **kwargs)
+            return builder.build(design, centre, axis, **kwargs)
 
         # 1. link count and closure across rhombus counts
         lines.append('Rhombus count sweep')
@@ -153,15 +156,27 @@ def run(context):
             lines.append('  %-20s %s' % (label, 'FAIL %s' % report['problems']
                                          if report['problems'] else 'ok'))
 
-        # 4. the start plane must be perpendicular to the spine plane
+        # 4. input axes: every origin axis (Y is vertical in a Y-up document,
+        # so it exercises the front-plane fallback) must build, and a centre
+        # off the axis must be refused before anything is drawn
         lines.append('')
-        lines.append('Plane relationship')
+        lines.append('Input axis')
+        for label, other_axis in (('origin Y axis', root.yConstructionAxis),
+                                  ('origin Z axis', root.zConstructionAxis)):
+            report = builder.build(design, centre, other_axis,
+                                   overrides={'n': '3'}, purge=True)
+            failures += 1 if report['problems'] else 0
+            lines.append('  %-16s %s' % (label, 'FAIL %s' % report['problems']
+                                         if report['problems'] else 'ok'))
+        probe = root.sketches.add(root.xYConstructionPlane)
+        off_axis = probe.sketchPoints.add(adsk.core.Point3D.create(0, 1, 0))
         try:
-            builder.build(design, centre, spine, spine, overrides={'n': '3'}, purge=True)
+            builder.build(design, off_axis, axis, overrides={'n': '3'}, purge=True)
             failures += 1
-            lines.append('  parallel planes  NOT REJECTED (fail)')
+            lines.append('  centre off axis  NOT REJECTED (fail)')
         except RuntimeError as err:
-            lines.append('  parallel planes  rejected: %s' % str(err).splitlines()[0][:52])
+            lines.append('  centre off axis  rejected: %s' % str(err).splitlines()[0][:52])
+        probe.deleteMe()
 
         # 5. re-running must replace, not accumulate; root must stay clean
         lines.append('')
@@ -192,7 +207,8 @@ def run(context):
         # 7. solid links on top of the skeleton
         lines.append('')
         lines.append('Solid links (n=2)')
-        report = build(overrides={'n': '2'}, purge=True, with_solids=True)
+        report = build(overrides={'n': '2'}, purge=True, with_solids=True,
+                           movable=False)
         comp = _build_component(design, ssm.COMPONENT_NAME)
         n_bodies = comp.bRepBodies.count
         ok_solids = (report.get('solid_bodies') == 6 and n_bodies == 6
@@ -218,7 +234,8 @@ def run(context):
                     if item.name.startswith(prefix) and item.isLightBulbOn]
 
         # default: grounded, spine and links visible, everything else not
-        report = build(overrides={'n': '2'}, purge=True, with_solids=True)
+        report = build(overrides={'n': '2'}, purge=True, with_solids=True,
+                           movable=False)
         occ = packed_occurrence()
         grounded = bool(occ and (getattr(occ, 'isGrounded', False)
                                  or getattr(occ, 'isGroundToParent', False)))
@@ -256,7 +273,7 @@ def run(context):
 
         # opting in hides the skeleton as well
         build(overrides={'n': '2'}, purge=True, with_solids=True,
-              hide_skeleton=True)
+              hide_skeleton=True, movable=False)
         comp = _build_component(design, ssm.COMPONENT_NAME)
         still_lit = lit(comp.sketches) + lit(comp.constructionPlanes)
         failures += 0 if not still_lit else 1
@@ -265,7 +282,8 @@ def run(context):
                         'ok' if not still_lit else 'FAIL %s' % still_lit[:3]))
 
         # ...and must not be sticky: the next default build shows it again
-        build(overrides={'n': '2'}, purge=True, with_solids=True, ground=False)
+        build(overrides={'n': '2'}, purge=True, with_solids=True, ground=False,
+              movable=False)
         occ = packed_occurrence()
         free = bool(occ and not getattr(occ, 'isGrounded', False))
         comp = _build_component(design, ssm.COMPONENT_NAME)
@@ -274,6 +292,88 @@ def run(context):
         failures += 0 if ok_optout else 1
         lines.append('  ground=False   ungrounded=%s  lit sketches=%d  %s'
                      % (free, shown, 'ok' if ok_optout else 'FAIL'))
+
+        # 9. movable links: components + revolute joints, driven
+        lines.append('')
+        lines.append('Movable links (n=3)')
+        report = build(overrides={'n': '3'}, purge=True, with_solids=True)
+        occ = packed_occurrence()
+        comp = _build_component(design, ssm.COMPONENT_NAME)
+        moved = report.get('movable') or {}
+        children = [o for o in comp.occurrences
+                    if o.component.name.startswith(prefix + 'Link_')]
+        welded = [o.name for o in children if o.isGroundToParent]
+        sets = [c.name for c in design.contactSets]
+        ok_struct = (not report['problems'] and moved.get('links') == 8
+                     and moved.get('joints') == 11 and len(children) == 8
+                     and not welded and sets.count(prefix + 'Links') == 1
+                     and not lit(comp.sketches))
+        failures += 0 if ok_struct else 1
+        lines.append('  structure      links %s joints %s welded %s contact %s '
+                     'lit sketches %d  %s'
+                     % (moved.get('links'), moved.get('joints'), welded or 'none',
+                        sets, len(lit(comp.sketches)),
+                        'ok' if ok_struct else 'FAIL %s' % report['problems']))
+
+        J = sys.modules['ssm.joints']
+        links = {o.component.name[len(prefix + 'Link_'):]: o.createForAssemblyContext(occ)
+                 for o in children}
+        bore = design.userParameters.itemByName('bearing_OD').value / 2.0
+        centre_pt = adsk.core.Point3D.create(0, 0, 0)
+        solved = {'n': 3, 'alpha': design.userParameters.itemByName('alpha').value,
+                  'span_target': design.userParameters.itemByName('span_target').value}
+        joints_by_name = {j.name: j for j in comp.asBuiltJoints}
+
+        def motion(name):
+            return adsk.fusion.RevoluteJointMotion.cast(
+                joints_by_name[name].createForAssemblyContext(occ).jointMotion)
+
+        def drive(name, target, steps=30):
+            m = motion(name)
+            start = m.rotationValue
+            for k in range(1, steps + 1):
+                m.rotationValue = start + (target - start) * k / steps
+            return m.rotationValue
+
+        def closed():
+            sites = J._pin_sites(links, bore, centre_pt)
+            return len(sites) == 10 and all(len(s['members']) == 2 for s in sites)
+
+        span0 = J._measured_span(links, bore, centre_pt)
+        drive(prefix + 'Swivel', math.radians(20))
+        swivel_drift = abs(J._measured_span(links, bore, centre_pt) - span0)
+        ok_swivel = closed() and swivel_drift < math.radians(1e-3)
+        drive(prefix + 'Swivel', 0.0)
+        failures += 0 if ok_swivel else 1
+        lines.append('  swivel 20 deg  span drift %.5f deg, closed %s  %s'
+                     % (math.degrees(swivel_drift), closed(),
+                        'ok' if ok_swivel else 'FAIL'))
+
+        limits = adsk.fusion.RevoluteJointMotion.cast(
+            joints_by_name[prefix + 'Span'].jointMotion).rotationLimits
+        target = 0.3 * limits.minimumValue  # toward span_max: no contact there
+        got = drive(prefix + 'Span', target)
+        span = J._measured_span(links, bore, centre_pt)
+        predicted = abs(2.0 * (J.seed_dihedral(span, solved)
+                               - J.seed_dihedral(solved['span_target'], solved)))
+        err = abs(predicted - abs(got))
+        # the solver may settle a few hundredths of a degree short of the last
+        # step; the formula check is what proves the motion is exact
+        ok_span = (closed() and abs(got - target) < math.radians(0.1)
+                   and err < math.radians(0.01))
+        drive(prefix + 'Span', 0.0)
+        failures += 0 if ok_span else 1
+        lines.append('  span joint     %.2f deg -> span %.3f deg, formula error '
+                     '%.5f deg, closed %s  %s'
+                     % (math.degrees(got), math.degrees(span), math.degrees(err),
+                        closed(), 'ok' if ok_span else 'FAIL'))
+
+        build(overrides={'n': '3'}, purge=True, with_solids=True)
+        sets = [c.name for c in design.contactSets]
+        ok_rebuild = sets.count(prefix + 'Links') == 1 and root.occurrences.count == 1
+        failures += 0 if ok_rebuild else 1
+        lines.append('  rebuild        contact sets %s, occurrences %d  %s'
+                     % (sets, root.occurrences.count, 'ok' if ok_rebuild else 'FAIL'))
 
         header = 'ALL CHECKS PASSED' if failures == 0 else '%d CHECK(S) FAILED' % failures
         text = header + '\n\n' + '\n'.join(lines)
